@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  # The main FastAPI backend
+  api:
+    build: .
+    container_name: qa_admin_api
+    ports:
+      - "8005:8005"
+    env_file:
+      - .env
+    environment:
+      # Override host to point to the docker-compose redis service
+      - REDIS_HOST=redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /var/log/czentrix:/var/log/czentrix
+    depends_on:
+      - redis
+    command: bash -c "pip install . && uvicorn app.main:app --host 0.0.0.0 --port 8005"
+
+  # The Celery background worker
+  worker:
+    build: .
+    container_name: qa_admin_worker
+    env_file:
+      - .env
+    environment:
+      # Override host to point to the docker-compose redis service
+      - REDIS_HOST=redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /var/log/czentrix:/var/log/czentrix
+    depends_on:
+      - api
+      - redis
+    command: bash -c "pip install . && celery -A app.worker.celery_app worker -l info"
+
+  # Redis for Celery and caching
+  redis:
+    image: redis:7-alpine
+    container_name: qa_admin_redis
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16
+    container_name: qa_admin_postgres
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=sqladmin
+      - POSTGRES_DB=qa_master
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+
+volumes:
+  pgdata:

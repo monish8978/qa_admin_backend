@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # qa_admin_backend
 
 
@@ -91,3 +92,146 @@ For open source projects, say how it is licensed.
 
 ## Project status
 If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+=======
+# `apps/api-py` — Python (FastAPI) backend for the QA Platform
+
+> Status: **Active backend — full port complete.** All 49 REST endpoints
+> validated end-to-end (`pass=49 fail=0` via `manual_smoke.py`). The legacy
+> NestJS service under `apps/api` is retained for reference only.
+> **Database Architecture Update:** Prisma dependency has been entirely removed.
+> Python SQLAlchemy fully manages the master and tenant PostgreSQL schemas, dynamically
+> creating databases, tables, and enum types (`create_type=True`). The entire infrastructure
+> (API, Celery Worker, Redis, and PostgreSQL) is containerized via Docker Compose.
+
+## Stack
+
+| Concern        | Choice                            |
+| -------------- | --------------------------------- |
+| HTTP framework | FastAPI                           |
+| ORM            | SQLAlchemy 2.0 (sync) + Alembic   |
+| DB driver      | psycopg 3                         |
+| Cache / locks  | redis-py                          |
+| Queues         | Celery (replaces BullMQ)          |
+| Auth           | bcrypt (passlib) + JWT (HS256)    |
+| Validation     | Pydantic v2                       |
+
+## Layout
+
+```
+apps/api-py/
+├─ app/
+│  ├─ main.py             # FastAPI entrypoint (mirrors apps/api/src/main.ts)
+│  ├─ config.py           # env via pydantic-settings (mirrors packages/config)
+│  ├─ db.py               # SQLAlchemy engine/session
+│  ├─ security.py         # bcrypt, JWT, SHA-256 helpers
+│  ├─ deps.py             # FastAPI deps (DB, current user, role guard)
+│  ├─ redis_client.py
+│  ├─ celery_app.py
+│  ├─ worker.py           # Celery worker entrypoint
+│  ├─ common/             # enums, response envelope, exceptions
+│  ├─ models/             # SQLAlchemy models for the master DB
+│  ├─ schemas/            # Pydantic request/response schemas
+│  ├─ services/           # AuthService, UsersService, NotifyService stub
+│  └─ routers/            # auth, users, health
+├─ alembic/               # Alembic migrations (Python now fully manages
+│                         # the schema, autogenerate ready)
+├─ alembic.ini
+├─ Dockerfile
+├─ pyproject.toml
+└─ .env.example
+```
+
+## Setup & Run
+
+The entire stack is containerized. To spin up the FastAPI backend, Celery worker, Redis, and PostgreSQL database with persistent volumes:
+
+```bash
+docker-compose down
+docker-compose up -d --build
+```
+
+*Note: The Python FastAPI backend automatically initializes the master database schema on startup, and the Celery background worker automatically creates and initializes tenant databases dynamically upon provisioning.*
+
+OpenAPI / Swagger UI: <http://127.0.0.1:8005/api/docs> (non-production only).
+
+## Database Migrations (Alembic)
+
+When you make changes to the database structure in your Python code (e.g., adding a new column to a table like `phone_number`), you need to run Alembic migrations so that the database structure updates without losing your existing data.
+
+1. **Generate the migration script** (run this after modifying models):
+```bash
+docker-compose exec api alembic revision --autogenerate -m "added_new_column"
+```
+*(Alembic will automatically compare your new code with the running database and generate the appropriate update script).*
+
+2. **Apply the migration**:
+```bash
+docker-compose exec api alembic upgrade head
+```
+*(This safely modifies the database tables while keeping all your old data completely intact).*
+
+## Smoke test
+
+A full HTTP smoke suite covering all 49 endpoints ships with the app:
+
+```powershell
+python apps/api-py/manual_smoke.py http://127.0.0.1:8005
+```
+
+Expected output: `RESULT: pass=49 fail=0`. The script logs in as the seeded
+`admin@dev.local` / `DevAdmin123!` user against tenant slug `dev-tenant`,
+falling back to signup when the seed is absent.
+
+## What's ported
+
+All NestJS modules are now available in Python. Endpoint inventory:
+
+**Public / health**
+
+- `GET  /api/v1/health` · `/health/ready` · `/health/metrics`
+- `GET  /api/v1/openapi.json` · `/api/docs`
+
+**Master-DB modules**
+
+- `POST /api/v1/auth/signup` · `login` · `refresh` · `logout`
+- `POST /api/v1/auth/forgot-password` · `reset-password` · `accept-invite`
+- `GET  /api/v1/auth/me`
+- `GET/POST/PATCH/DELETE /api/v1/users` (ADMIN; invite, last-admin guard)
+- `GET/POST/PATCH/DELETE /api/v1/departments` (channel-overlap guard)
+- `GET/PATCH /api/v1/settings/escalation`
+- `GET/PATCH /api/v1/settings/blind-review`
+- `GET/PATCH /api/v1/settings/email` · `POST /api/v1/settings/email/test`
+- `GET  /api/v1/settings/onboarding-status`
+- `GET/PUT  /api/v1/llm-config` · `POST /api/v1/llm-config/test`
+  (OpenAI / Azure / Custom endpoint validation + 12 s healthcheck)
+- `GET/POST/PATCH /api/v1/outbound-webhooks` · `GET .../deliveries`
+- `GET/POST/PATCH /api/v1/routing/mappings` · `GET .../stats` · `/audits` · `/settings`
+- `GET  /api/v1/billing/subscription` · `/billing/usage`
+- `POST /api/v1/billing/stripe/webhook`
+
+**Tenant-DB modules** (resolved via `TenantPool`, decrypts `dbPasswordEnc`)
+
+- `GET/POST/PATCH /api/v1/forms` · `POST /forms/{id}/status`
+- `GET/POST/PATCH /api/v1/conversations`
+- `GET  /api/v1/evaluations` · `/evaluations/queue/{qa,audit,escalation,verifier}`
+- `GET  /api/v1/evaluations/logs/prompt-audit`
+- `GET  /api/v1/analytics/{overview,agent-performance,ai-usage-trends,conversation-volume,deviation-trends,escalation-stats,form-score-distribution,qa-reviewer-performance,question-deviations,rejection-reasons,score-trends,sla-report,verifier-overrides,verifier-report}`
+- `POST /api/v1/webhooks/ingest`
+
+**Cross-cutting**
+
+- AES-256-GCM encryption util (`app/common/encryption.py`) — byte-compatible
+  with `apps/api/src/common/utils/encryption.util.ts`.
+- SQLAlchemy natively manages Postgres enum types (`PlanType`, `TenantStatus`,
+  `UserRole`, `UserStatus`, `SubscriptionStatus`, `Channel`, `ConvStatus`,
+  `FormStatus`, `WorkflowState`, `DeviationType`, `QueueType`) with
+  `create_type=True, native_enum=True, validate_strings=True`.
+- Per-tenant Postgres pool (`app/services/tenant_pool.py`) with
+  30-min idle reaper + 1-h Redis heartbeat.
+- Real SMTP notify (`app/services/notify_service.py`) — per-tenant
+  `TenantEmailSettings` with platform-SMTP fallback, templates
+  `tenant_ready` · `user_invited` · `password_reset`.
+- Celery task wiring (`tenant.provision`, `eval.process`, `eval.escalate`,
+  `notify.send`, `billing.usage.sync`, `report.export`) replaces BullMQ.
+- Prometheus metrics + structlog wiring.
+>>>>>>> e043e17 (Initial commit)
