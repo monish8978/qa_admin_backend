@@ -125,6 +125,20 @@ class TenantPool:
             ).scalar_one_or_none()
             if tenant is None:
                 raise not_found("TENANT_NOT_FOUND", f"Tenant {tenant_id} not found")
+            
+            if not tenant.dbPasswordEnc:
+                from .provision_task import tenant_provision
+                from ..models.master import User
+                admin_user = master.scalar(
+                    select(User).where(User.tenantId == tenant_id, User.role == "ADMIN")
+                )
+                admin_user_id = admin_user.id if admin_user else "system"
+                log.info("Auto-provisioning tenant %s dynamically on connection demand", tenant_id)
+                try:
+                    tenant_provision(tenantId=tenant_id, adminUserId=admin_user_id)
+                    master.refresh(tenant)
+                except Exception as e:
+                    log.error("Failed to dynamically provision tenant %s: %s", tenant_id, e)
             if tenant.status != "ACTIVE":
                 log.warning("tenant_pool: tenant %s status=%s", tenant_id, tenant.status)
                 if tenant.status == "PROVISIONING":

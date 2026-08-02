@@ -56,7 +56,7 @@ celery_app.conf.update(
     beat_schedule={
         "stale-queue-escalation-scan": {
             "task": "eval.escalate.scan",
-            "schedule": 30 * 60,  # every 30 minutes
+            "schedule": 60,  # every 1 minute
         },
     },
 )

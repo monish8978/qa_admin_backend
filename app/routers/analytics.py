@@ -155,20 +155,20 @@ def score_trends(
     return build_response(res, rid)
 
 
-@router.get("/ai-usage-trends")
-def ai_usage_trends(
-    payload: Annotated[dict, Depends(require_roles(UserRole.ADMIN, UserRole.QA, UserRole.VERIFIER))],
-    db: Annotated[Session, Depends(get_db)],
-    rid: Annotated[str, Depends(get_request_id)],
-    from_: str | None = Query(None, alias="from"),
-    to: str | None = Query(None),
-):
-    tenant_id = payload["tenantId"]
-    log.info("[%s] Fetching AI usage trends for tenant: %s (from=%s, to=%s)", rid, tenant_id, from_, to)
-    f, t = _range(from_, to, default_days=365)
-    res = svc.ai_usage_trends(db, tenant_id, f, t)
-    log.info("[%s] Successfully retrieved AI usage trends for tenant: %s", rid, tenant_id)
-    return build_response(res, rid)
+# @router.get("/ai-usage-trends")
+# def ai_usage_trends(
+#     payload: Annotated[dict, Depends(require_roles(UserRole.ADMIN, UserRole.QA, UserRole.VERIFIER))],
+#     db: Annotated[Session, Depends(get_db)],
+#     rid: Annotated[str, Depends(get_request_id)],
+#     from_: str | None = Query(None, alias="from"),
+#     to: str | None = Query(None),
+# ):
+#     tenant_id = payload["tenantId"]
+#     log.info("[%s] Fetching AI usage trends for tenant: %s (from=%s, to=%s)", rid, tenant_id, from_, to)
+#     f, t = _range(from_, to, default_days=365)
+#     res = svc.ai_usage_trends(db, tenant_id, f, t)
+#     log.info("[%s] Successfully retrieved AI usage trends for tenant: %s", rid, tenant_id)
+#     return build_response(res, rid)
 
 
 @router.get("/qa-reviewer-performance")

@@ -253,31 +253,59 @@ def tenant_provision(self, *, tenantId: str, adminUserId: str) -> dict[str, Any]
             )
         tenant = master.get(Tenant, tenantId)
         if tenant:
-            tenant.status = "ACTIVE"
+            tenant.status = "ACTIVE"  # Automatically activate upon signup
         master.commit()
 
         log.info("[provision] Tenant %s is now ACTIVE", tenantId)
 
-        admin_email = admin.email if admin else None
-        admin_name = admin.name if admin else None
-        tenant_name = tenant.name if tenant else ""
-        login_url = f"{settings.API_URL.replace('/api', '')}/login"
+        # Send alert email and in-app notification to Super Admin
+        from ..models.master import PlatformNotification, PlatformAuditLog
 
-        if admin_email:
-            try:
-                send_notification(
-                    master,
-                    template="tenant_ready",
-                    to=admin_email,
-                    context={
-                        "adminName": admin_name or admin_email,
-                        "tenantName": tenant_name,
-                        "loginUrl": login_url,
-                    },
-                    tenant_id=tenantId,
-                )
-            except Exception:  # noqa: BLE001
-                log.warning("[provision] tenant_ready notify failed", exc_info=True)
+        try:
+            # 1. Create In-App Notification for Super Admin
+            notif = PlatformNotification(
+                title="New Workspace Registered",
+                message=f"Workspace '{tenant.name}' ({tenant.slug}) has registered under the {tenant.plan} plan.",
+                type="info",
+                target_audience="super_admin",
+                sent_by="System"
+            )
+            master.add(notif)
+
+            # 2. Create Audit Log
+            audit = PlatformAuditLog(
+                user_id=admin.id if admin else None,
+                user_email=admin.email if admin else "System",
+                action="tenant.registered",
+                resource_type="tenant",
+                resource_id=tenantId,
+                details={
+                    "tenantName": tenant.name,
+                    "tenantSlug": tenant.slug,
+                    "adminName": admin.name if admin else None,
+                    "adminEmail": admin.email if admin else None,
+                    "plan": tenant.plan if isinstance(tenant.plan, str) else tenant.plan.value,
+                },
+            )
+            master.add(audit)
+            master.commit()
+
+            # 2. Send Email Alert
+            send_notification(
+                master,
+                template="tenant_signup_admin_alert",
+                to=settings.EMAIL_FROM,
+                context={
+                    "tenantName": tenant.name,
+                    "tenantSlug": tenant.slug,
+                    "adminName": admin.name,
+                    "adminEmail": admin.email,
+                    "plan": tenant.plan,
+                },
+            )
+            log.info("[provision] Sent informational signup alert to %s for tenant: %s", settings.EMAIL_FROM, tenant.slug)
+        except Exception as e:
+            log.error("[provision] Failed to send signup informational alert to admin: %s", e)
 
     return {"tenantId": tenantId, "dbName": db_name, "status": "ACTIVE"}
 

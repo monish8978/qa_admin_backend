@@ -71,10 +71,23 @@ def _esc(row) -> EscalationRuleResponse:
     )
 
 
+DEFAULT_BUCKETS = [
+    { "id": "best", "name": "Best Performance", "min": 90.0, "max": 100.0, "color": "emerald" },
+    { "id": "good", "name": "Good Performance", "min": 70.0, "max": 89.9, "color": "blue" },
+    { "id": "avg", "name": "Average Performance", "min": 60.0, "max": 69.9, "color": "amber" },
+    { "id": "poor", "name": "Poor Performance", "min": 0.0, "max": 59.9, "color": "red" }
+]
+
+
 def _blind(row) -> BlindReviewResponse:
     return BlindReviewResponse(
         hideAgentFromQA=row.hideAgentFromQA,
         hideQAFromVerifier=row.hideQAFromVerifier,
+        bestThreshold=row.bestThreshold,
+        goodThreshold=row.goodThreshold,
+        avgThreshold=row.avgThreshold,
+        poorThreshold=row.poorThreshold,
+        scoreBuckets=row.scoreBuckets if (row.scoreBuckets and len(row.scoreBuckets) > 0) else DEFAULT_BUCKETS,
     )
 
 

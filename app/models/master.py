@@ -23,6 +23,8 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     func,
+    Column,
+    Text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import JSONB
@@ -91,6 +93,13 @@ class Tenant(Base):
 
     users: Mapped[list["User"]] = relationship(back_populates="tenant", cascade="all, delete")
 
+    customConversationsLimit: Mapped[int | None] = mapped_column("customConversationsLimit", Integer, nullable=True)
+    customFormsLimit: Mapped[int | None] = mapped_column("customFormsLimit", Integer, nullable=True)
+    customUsersLimit: Mapped[int | None] = mapped_column("customUsersLimit", Integer, nullable=True)
+    featureFlags: Mapped[dict | None] = mapped_column("featureFlags", JSONB, nullable=True, default=dict)
+    pendingPlan: Mapped[str | None] = mapped_column("pendingPlan", _PLAN_TYPE, nullable=True)
+    deletedAt: Mapped[datetime | None] = mapped_column("deletedAt", DateTime(timezone=True), nullable=True)
+
 
 class User(Base):
     __tablename__ = "users"
@@ -121,6 +130,9 @@ class User(Base):
     )
     updatedAt: Mapped[datetime] = mapped_column(
         "updatedAt", DateTime(timezone=True), default=func.now(), server_default=func.now(), onupdate=func.now()
+    )
+    deletedAt: Mapped[datetime | None] = mapped_column(
+        "deletedAt", DateTime(timezone=True), nullable=True
     )
 
     tenant: Mapped[Tenant] = relationship(back_populates="users")
@@ -253,6 +265,28 @@ class UsageMetric(Base):
     )
 
 
+class PlatformPlan(Base):
+    __tablename__ = "platform_plans"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_cuid)
+    code: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str | None] = mapped_column(String, nullable=True)
+    priceMonthly: Mapped[int] = mapped_column("priceMonthly", Integer, nullable=False, default=0)
+    priceYearly: Mapped[int] = mapped_column("priceYearly", Integer, nullable=False, default=0)
+    conversationsLimit: Mapped[int | None] = mapped_column("conversationsLimit", Integer, nullable=True)
+    formsLimit: Mapped[int | None] = mapped_column("formsLimit", Integer, nullable=True)
+    usersLimit: Mapped[int | None] = mapped_column("usersLimit", Integer, nullable=True)
+    features: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default='[]')
+    isActive: Mapped[bool] = mapped_column("isActive", Boolean, nullable=False, default=True)
+    createdAt: Mapped[datetime] = mapped_column(
+        "createdAt", DateTime(timezone=True), server_default=func.now()
+    )
+    updatedAt: Mapped[datetime] = mapped_column(
+        "updatedAt", DateTime(timezone=True), default=func.now(), server_default=func.now(), onupdate=func.now()
+    )
+
+
 # ─── extended master models (LLM / settings / billing / webhooks / routing) ──
 
 
@@ -333,6 +367,21 @@ class BlindReviewSettings(Base):
     )
     hideQAFromVerifier: Mapped[bool] = mapped_column(
         "hideQAFromVerifier", Boolean, nullable=False, default=False
+    )
+    bestThreshold: Mapped[float] = mapped_column(
+        "bestThreshold", Float, nullable=False, default=90.0
+    )
+    goodThreshold: Mapped[float] = mapped_column(
+        "goodThreshold", Float, nullable=False, default=75.0
+    )
+    avgThreshold: Mapped[float] = mapped_column(
+        "avgThreshold", Float, nullable=False, default=60.0
+    )
+    poorThreshold: Mapped[float] = mapped_column(
+        "poorThreshold", Float, nullable=False, default=0.0
+    )
+    scoreBuckets: Mapped[list | None] = mapped_column(
+        "scoreBuckets", JSONB, nullable=True, default=list
     )
     createdAt: Mapped[datetime] = mapped_column(
         "createdAt", DateTime(timezone=True), server_default=func.now()
@@ -551,3 +600,27 @@ class Invoice(Base):
 
 
 
+
+class PlatformAuditLog(Base):
+    __tablename__ = "platform_audit_logs"
+
+    id = Column(String(50), primary_key=True, default=lambda: f"aud_{new_cuid()}")
+    user_id = Column(String(100), nullable=True) # ID of admin who performed action
+    user_email = Column(String(255), nullable=True)
+    action = Column(String(100), nullable=False) # e.g. "plan.updated", "tenant.deleted"
+    resource_type = Column(String(50), nullable=False) # e.g. "plan", "tenant"
+    resource_id = Column(String(100), nullable=True)
+    details = Column(JSONB, nullable=True)
+    ip_address = Column(String(45), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class PlatformNotification(Base):
+    __tablename__ = "platform_notifications"
+
+    id = Column(String(50), primary_key=True, default=lambda: f"notif_{new_cuid()}")
+    title = Column(String(200), nullable=False)
+    message = Column(Text, nullable=False)
+    type = Column(String(50), nullable=False, default="info") # info, warning, success
+    target_audience = Column(String(50), nullable=False, default="all") # all, active, enterprise
+    sent_by = Column(String(255), nullable=True) # Admin email
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

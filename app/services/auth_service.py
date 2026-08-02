@@ -7,6 +7,9 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session, selectinload
 
+import random
+import json
+
 from ..common.enums import PlanType, UserStatus
 from ..common.exceptions import bad_request, conflict, forbidden, unauthorized
 from ..config import get_settings
@@ -17,6 +20,7 @@ from ..schemas.auth import (
     LoginRequest,
     ResetPasswordRequest,
     SignupRequest,
+    VerifyMfaRequest,
 )
 from ..security import (
     hash_password,
@@ -41,9 +45,22 @@ class AuthService:
 
     # ── Signup ────────────────────────────────────────────────────────────────
     def signup(self, dto: SignupRequest) -> dict:
+        redis = get_redis()
+        if redis is None:
+            raise bad_request("FEATURE_UNAVAILABLE", "Redis is required for signup verification.")
+
+        verified = redis.get(f"signup_verified:{dto.adminEmail}")
+        if not verified:
+            raise bad_request(
+                "EMAIL_NOT_VERIFIED", "Please verify your email address using OTP first."
+            )
+
         existing = self.db.scalar(select(Tenant).where(Tenant.slug == dto.tenantSlug))
         if existing:
             raise conflict("TENANT_SLUG_TAKEN", "Tenant slug is already taken")
+
+        # Delete verification state so it cannot be reused
+        redis.delete(f"signup_verified:{dto.adminEmail}")
 
         now = datetime.now(tz=timezone.utc)
         trial_end = now + timedelta(days=30)
@@ -52,7 +69,7 @@ class AuthService:
             slug=dto.tenantSlug,
             name=dto.tenantName,
             plan=dto.plan.value,
-            status="PROVISIONING",
+            status="PROVISIONING",  # Keep as provisioning so DB can be seeded
         )
         self.db.add(tenant)
         self.db.flush()
@@ -63,7 +80,7 @@ class AuthService:
             name=dto.adminName,
             passwordHash=hash_password(dto.password),
             role="ADMIN",
-            status="ACTIVE",
+            status="INACTIVE",  # Inactive until approved
         )
         self.db.add(admin)
 
@@ -79,8 +96,6 @@ class AuthService:
         )
         self.db.flush()
 
-        access, refresh = self._issue_and_store(admin)
-
         from .provision_task import tenant_provision
         log.info("Provisioning tenant %s synchronously to prevent race conditions", tenant.slug)
         
@@ -94,9 +109,13 @@ class AuthService:
             log.error("Synchronous provisioning failed for tenant %s: %s", tenant.id, e, exc_info=True)
             raise bad_request("PROVISIONING_FAILED", "Failed to provision tenant database") from e
 
-        log.info("signup ok tenant=%s admin=%s", tenant.slug, admin.email)
+        log.info("signup registered and auto-activated tenant=%s admin=%s", tenant.slug, admin.email)
+
+        access, refresh = self._issue_and_store(admin)
+        self.db.commit()
 
         return {
+            "pendingApproval": False,
             "accessToken": access,
             "refreshToken": refresh,
             "tenant": {
@@ -105,11 +124,33 @@ class AuthService:
                 "name": tenant.name,
                 "plan": tenant.plan,
             },
+            "user": {
+                "id": admin.id,
+                "name": admin.name,
+                "email": admin.email,
+                "role": admin.role,
+            },
         }
 
     # ── Login ────────────────────────────────────────────────────────────────
     def login(self, dto: LoginRequest, tenant_slug: str | None) -> dict:
-        stmt = select(User).options(selectinload(User.tenant)).where(User.email == dto.email)
+        if tenant_slug:
+            tenant = self.db.scalar(select(Tenant).where(Tenant.slug == tenant_slug))
+            if not tenant:
+                raise bad_request("INVALID_WORKSPACE", "Invalid workspace slug. Workspace does not exist.")
+
+        # Check if the user exists but is soft-deleted
+        deleted_user_stmt = select(User)
+        if tenant_slug:
+            deleted_user_stmt = deleted_user_stmt.join(User.tenant).where(Tenant.slug == tenant_slug)
+        deleted_user = self.db.scalar(deleted_user_stmt.where(User.email == dto.email, User.deletedAt.isnot(None)))
+        if deleted_user:
+            raise bad_request(
+                "ACCOUNT_DELETED",
+                "Your account has been deleted by your organization. Please contact your organization administrator to restore access."
+            )
+
+        stmt = select(User).options(selectinload(User.tenant)).where(User.email == dto.email, User.deletedAt.is_(None))
         if tenant_slug:
             stmt = stmt.join(User.tenant).where(Tenant.slug == tenant_slug)
         # Emails are unique *per tenant*, not globally. Without an explicit
@@ -129,12 +170,20 @@ class AuthService:
         user = matches[0] if matches else None
 
         if not user:
+            user_anywhere = self.db.scalar(select(User).where(User.email == dto.email, User.deletedAt.is_(None)))
+            if tenant_slug and user_anywhere:
+                raise bad_request("INVALID_WORKSPACE_SLUG", "Invalid workspace slug for this account")
+
             log.warning(
                 "login failed reason=INVALID_CREDENTIALS email=%s tenantSlug=%s",
                 dto.email,
                 tenant_slug,
             )
             raise unauthorized("INVALID_CREDENTIALS", "Invalid email or password")
+
+        if user.tenant and user.tenant.status == "ACTIVE" and user.status == UserStatus.INACTIVE.value:
+            user.status = UserStatus.ACTIVE.value
+            self.db.commit()
 
         if user.status == UserStatus.INACTIVE.value:
             raise forbidden("ACCOUNT_SUSPENDED", "Account is deactivated")
@@ -145,15 +194,86 @@ class AuthService:
         if not verify_password(dto.password, user.passwordHash):
             raise unauthorized("INVALID_CREDENTIALS", "Invalid email or password")
 
+        # Bypass 2FA if requested
+        if dto.skip2fa:
+            log.info("Bypassing 2FA for user=%s tenant=%s", user.email, user.tenantId)
+            return self._complete_login(user)
+
+        # Generate MFA OTP and session
+        redis = get_redis()
+        if redis is None:
+            raise bad_request("FEATURE_UNAVAILABLE", "Redis is required for MFA.")
+
+        otp = str(random.randint(100000, 999999))
+        mfa_token = random_token_hex(32)
+        redis.set(f"mfa_session:{mfa_token}", json.dumps({"userId": user.id, "otp": otp}), ex=300)
+        log.info("OTP generated for user %s: %s", user.email, otp)
+
+        try:
+            notify_service.send_notification(
+                self.db,
+                template="mfa_otp",
+                to=user.email,
+                context={"otp": otp},
+                tenant_id=user.tenantId,
+            )
+        except Exception as e:
+            log.error("Failed to send verification OTP email: %s", e)
+
+        log.info("login mfa_required user=%s tenant=%s", user.email, user.tenantId)
+        return {
+            "mfaRequired": True,
+            "mfaToken": mfa_token,
+        }
+
+    # ── Verify MFA ────────────────────────────────────────────────────────────
+    def verify_mfa(self, dto: VerifyMfaRequest) -> dict:
+        redis = get_redis()
+        if redis is None:
+            raise bad_request("FEATURE_UNAVAILABLE", "Redis is required for MFA.")
+
+        session_data_bytes = redis.get(f"mfa_session:{dto.mfaToken}")
+        if not session_data_bytes:
+            raise bad_request("INVALID_MFA_TOKEN", "The verification code (OTP) has expired or is invalid. Please request a new code.")
+
+        session_data = json.loads(
+            session_data_bytes.decode("utf-8")
+            if isinstance(session_data_bytes, bytes)
+            else session_data_bytes
+        )
+
+        if session_data.get("otp") != dto.otp:
+            raise unauthorized("INVALID_OTP", "Invalid OTP entered.")
+
+        redis.delete(f"mfa_session:{dto.mfaToken}")
+
+        user_id = session_data.get("userId")
+        user = self.db.scalar(
+            select(User).options(selectinload(User.tenant)).where(User.id == user_id)
+        )
+        if not user:
+            raise unauthorized("USER_NOT_FOUND", "User not found.")
+
+        if user.tenant and user.tenant.status == "ACTIVE" and user.status == UserStatus.INACTIVE.value:
+            user.status = UserStatus.ACTIVE.value
+            self.db.commit()
+
+        if user.status == UserStatus.INACTIVE.value:
+            raise forbidden("ACCOUNT_SUSPENDED", "Account is deactivated")
+
+        if user.tenant.status in ("SUSPENDED", "CANCELLED"):
+            raise forbidden("ACCOUNT_SUSPENDED", "Tenant account is suspended")
+
+        return self._complete_login(user)
+
+    def _complete_login(self, user: User) -> dict:
         now = datetime.now(tz=timezone.utc)
         prev_login = user.lastLoginAt
-        # Postgres `timestamp(3)` (Prisma default) returns naive datetimes; normalise to UTC.
         if prev_login is not None and prev_login.tzinfo is None:
             prev_login = prev_login.replace(tzinfo=timezone.utc)
         user.lastLoginAt = now
 
-        # Monthly active user metric (mirrors Nest behaviour). Use the shared
-        # period helper so the UsageMetric unique key matches every other writer.
+        # Monthly active user metric
         from .usage_meter_service import current_period
 
         period_start, period_end = current_period(now)
@@ -200,23 +320,33 @@ class AuthService:
         token_hash = sha256_hex(raw_refresh)
         now = datetime.now(tz=timezone.utc)
 
-        # Atomically revoke the presented token. Only one concurrent refresh can
-        # win the UPDATE … WHERE revokedAt IS NULL race; the loser gets zero rows
-        # and is rejected, preventing refresh-token reuse / double issuance.
         from sqlalchemy import update
 
-        result = self.db.execute(
-            update(RefreshToken)
-            .where(
-                RefreshToken.tokenHash == token_hash,
-                RefreshToken.revokedAt.is_(None),
-                RefreshToken.expiresAt > now,
-            )
-            .values(revokedAt=now)
+        # Fetch the token to inspect its status
+        existing = self.db.scalar(
+            select(RefreshToken).where(RefreshToken.tokenHash == token_hash)
         )
-        if result.rowcount != 1:
-            self.db.rollback()
-            raise unauthorized("TOKEN_REVOKED", "Refresh token has been revoked")
+        if not existing:
+            raise unauthorized("TOKEN_EXPIRED", "Refresh token is expired or invalid")
+
+        # Reuse Detection: if the token is already revoked, revoke all tokens for this user
+        if existing.revokedAt is not None:
+            self.db.execute(
+                update(RefreshToken)
+                .where(
+                    RefreshToken.userId == existing.userId,
+                    RefreshToken.revokedAt.is_(None),
+                )
+                .values(revokedAt=now)
+            )
+            self.db.commit()
+            raise unauthorized("TOKEN_REUSE_DETECTED", "Refresh token reuse detected. All sessions revoked.")
+
+        if existing.expiresAt <= now:
+            raise unauthorized("TOKEN_EXPIRED", "Refresh token is expired")
+
+        # Mark the token as used/revoked
+        existing.revokedAt = now
 
         user = self.db.scalar(
             select(User).options(selectinload(User.tenant)).where(User.id == payload["sub"])
@@ -272,17 +402,33 @@ class AuthService:
 
         token = random_token_hex(32)
         token_hash = sha256_hex(token)
+        otp = str(random.randint(100000, 999999))
+        log.info("Password Reset OTP generated for user %s: %s", email, otp)
 
         redis = get_redis()
         if redis is None:
             log.warning("forgot_password skipped — Redis disabled")
             return
-        redis.set(f"pwd_reset:{token_hash}", user.id, ex=PASSWORD_RESET_TTL_S)
+
+        redis.set(
+            f"pwd_reset:{token_hash}",
+            json.dumps({"userId": user.id, "otp": otp}),
+            ex=PASSWORD_RESET_TTL_S,
+        )
+        redis.set(
+            f"pwd_reset:email:{email}",
+            json.dumps({"userId": user.id, "otp": otp}),
+            ex=PASSWORD_RESET_TTL_S,
+        )
 
         reset_url = f"{self.settings.WEB_URL}/reset-password?token={token}"
         try:
-            notify_service.send_email(
-                to=email, template="password_reset", data={"resetUrl": reset_url}
+            notify_service.send_notification(
+                self.db,
+                template="password_reset",
+                to=email,
+                context={"resetUrl": reset_url, "otp": otp, "name": user.name},
+                tenant_id=user.tenantId,
             )
         except Exception as e:  # non-fatal — same behaviour as Nest
             log.error("notify failed: %s", e)
@@ -295,16 +441,34 @@ class AuthService:
                 "FEATURE_UNAVAILABLE",
                 "Password reset requires Redis. Please contact your administrator.",
             )
-        token_hash = sha256_hex(dto.token)
-        user_id = redis.get(f"pwd_reset:{token_hash}")
-        if not user_id:
-            raise bad_request("INVALID_RESET_TOKEN", "Reset token is invalid or expired")
 
+        session_data_bytes = None
+        token_hash = None
+        if "@" in dto.token:
+            session_data_bytes = redis.get(f"pwd_reset:email:{dto.token}")
+        else:
+            token_hash = sha256_hex(dto.token)
+            session_data_bytes = redis.get(f"pwd_reset:{token_hash}")
+
+        if not session_data_bytes:
+            raise bad_request("INVALID_RESET_TOKEN", "Reset token or email is invalid or expired")
+
+        session_data = json.loads(
+            session_data_bytes.decode("utf-8")
+            if isinstance(session_data_bytes, bytes)
+            else session_data_bytes
+        )
+
+        user_id = session_data.get("userId")
         user = self.db.get(User, user_id)
         if not user:
             raise bad_request("INVALID_RESET_TOKEN", "Reset token is invalid or expired")
         user.passwordHash = hash_password(dto.password)
-        redis.delete(f"pwd_reset:{token_hash}")
+
+        if "@" in dto.token:
+            redis.delete(f"pwd_reset:email:{dto.token}")
+        else:
+            redis.delete(f"pwd_reset:{token_hash}")
 
         now = datetime.now(tz=timezone.utc)
         for t in self.db.scalars(
@@ -348,6 +512,10 @@ class AuthService:
         user = self.db.get(User, user_id)
         if not user:
             raise unauthorized("USER_NOT_FOUND", "User not found")
+        
+        allowed_emails = [e.strip().lower() for e in self.settings.SUPER_ADMIN_EMAILS.split(",") if e.strip()]
+        is_sa = user.role == "ADMIN" and user.email.lower() in allowed_emails
+
         return {
             "id": user.id,
             "email": user.email,
@@ -356,7 +524,83 @@ class AuthService:
             "status": user.status,
             "tenantId": user.tenantId,
             "lastLoginAt": user.lastLoginAt,
+            "isSuperAdmin": is_sa,
         }
+
+    # ── Signup OTP & Approval ──────────────────────────────────────────────────
+    def signup_send_otp(self, email: str) -> None:
+        otp = str(random.randint(100000, 999999))
+        log.info("Signup OTP generated for email %s: %s", email, otp)
+        redis = get_redis()
+        if redis is None:
+            raise bad_request("FEATURE_UNAVAILABLE", "Redis is required for email verification.")
+        redis.set(f"signup_otp:{email}", otp, ex=300)  # 5 minutes
+
+        try:
+            notify_service.send_notification(
+                self.db,
+                template="signup_otp",
+                to=email,
+                context={"otp": otp},
+            )
+        except Exception as e:
+            log.error("notify failed: %s", e)
+
+    def signup_verify_otp(self, email: str, otp: str) -> None:
+        redis = get_redis()
+        if redis is None:
+            raise bad_request("FEATURE_UNAVAILABLE", "Redis is required for email verification.")
+        saved = redis.get(f"signup_otp:{email}")
+        if not saved:
+            raise bad_request("INVALID_OTP", "OTP code is expired or invalid. Please request a new one.")
+        saved_str = saved.decode("utf-8") if isinstance(saved, bytes) else saved
+        if saved_str != otp:
+            raise bad_request("INVALID_OTP", "Invalid OTP code entered.")
+
+        redis.delete(f"signup_otp:{email}")
+        redis.set(f"signup_verified:{email}", "true", ex=900)  # 15 minutes
+
+    def approve_tenant(self, tenant_id: str, token: str) -> None:
+        redis = get_redis()
+        if redis is None:
+            raise bad_request("FEATURE_UNAVAILABLE", "Redis is required for tenant approval.")
+
+        saved = redis.get(f"tenant_approval:{tenant_id}")
+        if not saved:
+            raise bad_request("INVALID_TOKEN", "Approval link is invalid or expired.")
+        saved_str = saved.decode("utf-8") if isinstance(saved, bytes) else saved
+        if saved_str != token:
+            raise bad_request("INVALID_TOKEN", "Approval link is invalid or expired.")
+
+        tenant = self.db.get(Tenant, tenant_id)
+        if not tenant:
+            raise bad_request("TENANT_NOT_FOUND", "Tenant not found.")
+
+        # Approve tenant and user
+        tenant.status = "ACTIVE"
+
+        admin_user = self.db.scalar(
+            select(User).where(User.tenantId == tenant_id, User.role == "ADMIN")
+        )
+        if admin_user:
+            admin_user.status = "ACTIVE"
+
+        redis.delete(f"tenant_approval:{tenant_id}")
+        self.db.commit()
+
+        # Send approval notification to registered user
+        if admin_user:
+            try:
+                login_url = f"{self.settings.WEB_URL}/login"
+                notify_service.send_notification(
+                    self.db,
+                    template="tenant_approved",
+                    to=admin_user.email,
+                    context={"tenantName": tenant.name, "loginUrl": login_url, "name": admin_user.name},
+                    tenant_id=tenant.id,
+                )
+            except Exception as e:
+                log.error("Failed to send approval mail to user: %s", e)
 
     # ── Helpers ──────────────────────────────────────────────────────────────
     def _issue_and_store(self, user: User) -> tuple[str, str]:

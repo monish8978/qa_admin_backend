@@ -107,7 +107,7 @@ def overview(tenant_id: str, from_: datetime, to: datetime, role: str | None = N
             completed = ts.execute(
                 text(
                     f'SELECT COUNT(*) FROM evaluations '
-                    f'WHERE "workflowState" = \'LOCKED\' AND "updatedAt" >= :a AND "updatedAt" <= :b{eval_filter}'
+                    f'WHERE "workflowState" = \'LOCKED\' AND "lockedAt" >= :a AND "lockedAt" <= :b{eval_filter}'
                 ),
                 params,
             ).scalar_one()
@@ -176,6 +176,28 @@ def overview(tenant_id: str, from_: datetime, to: datetime, role: str | None = N
 
 def agent_performance(tenant_id: str, from_: datetime, to: datetime) -> list[dict[str, Any]]:
     def _produce():
+        DEFAULT_BUCKETS = [
+            { "id": "best", "name": "Best Performance", "min": 90.0, "max": 100.0, "color": "emerald" },
+            { "id": "good", "name": "Good Performance", "min": 70.0, "max": 89.9, "color": "blue" },
+            { "id": "avg", "name": "Average Performance", "min": 60.0, "max": 69.9, "color": "amber" },
+            { "id": "poor", "name": "Poor Performance", "min": 0.0, "max": 59.9, "color": "red" }
+        ]
+        from ..db import SessionLocal
+        from ..models.master import BlindReviewSettings
+        with SessionLocal() as master:
+            blind = master.execute(
+                select(BlindReviewSettings).where(BlindReviewSettings.tenantId == tenant_id)
+            ).scalar_one_or_none()
+            buckets = blind.scoreBuckets if (blind and blind.scoreBuckets and len(blind.scoreBuckets) > 0) else DEFAULT_BUCKETS
+
+        select_clauses = []
+        for b in buckets:
+            b_id = b["id"]
+            b_min = float(b["min"])
+            b_max = float(b["max"])
+            select_clauses.append(f'SUM(CASE WHEN e."finalScore" >= {b_min} AND e."finalScore" <= {b_max} THEN 1 ELSE 0 END) AS "{b_id}_count"')
+        select_sql = ",\n                           ".join(select_clauses)
+
         pool = get_tenant_pool()
         with pool.session(tenant_id) as ts:
             rows = ts.execute(
@@ -185,7 +207,8 @@ def agent_performance(tenant_id: str, from_: datetime, to: datetime) -> list[dic
                            COUNT(e.id) AS count,
                            AVG(e."finalScore") AS avg_score,
                            SUM(CASE WHEN e."passFail" = true AND {_CRIT_FAIL_NOT_CLAUSE}
-                                    THEN 1 ELSE 0 END) AS pass_count
+                                    THEN 1 ELSE 0 END) AS pass_count,
+                           {select_sql}
                     FROM conversations c
                     JOIN evaluations e ON e."conversationId" = c.id
                     WHERE e."workflowState" = 'LOCKED'
@@ -204,6 +227,11 @@ def agent_performance(tenant_id: str, from_: datetime, to: datetime) -> list[dic
                 "totalEvaluations": int(r["count"]),
                 "avgScore": _round1(r["avg_score"]),
                 "passRate": _round1_rate(int(r["pass_count"]), int(r["count"])),
+                "bestCount": 0,
+                "goodCount": 0,
+                "averageCount": 0,
+                "poorCount": 0,
+                "bucketCounts": {b["id"]: int(r[f"{b['id']}_count"] or 0) for b in buckets}
             }
             for r in rows
         ]
@@ -456,36 +484,36 @@ def score_trends(tenant_id: str, from_: datetime, to: datetime) -> dict[str, lis
     return _cached(tenant_id, "score_trends", from_, to, _produce)
 
 
-def ai_usage_trends(
-    master: Session, tenant_id: str, from_: datetime, to: datetime
-) -> list[dict[str, Any]]:
-    def _produce():
-        rows = list(
-            master.execute(
-                select(UsageMetric)
-                .where(
-                    (UsageMetric.tenantId == tenant_id)
-                    & (UsageMetric.periodStart >= from_)
-                    & (UsageMetric.periodEnd <= to)
-                )
-                .order_by(UsageMetric.periodStart.asc())
-            ).scalars()
-        )
-        return [
-            {
-                "period": m.periodStart.strftime("%Y-%m"),
-                "periodStart": m.periodStart.isoformat(),
-                "periodEnd": m.periodEnd.isoformat(),
-                "conversationsProcessed": m.conversationsProcessed,
-                "aiTokensUsed": int(m.aiTokensUsed),
-                "aiCostCents": m.aiCostCents,
-                "aiCostDollars": m.aiCostCents / 100,
-                "activeUsers": m.activeUsers,
-            }
-            for m in rows
-        ]
-
-    return _cached(tenant_id, "ai_usage_trends", from_, to, _produce)
+# def ai_usage_trends(
+#     master: Session, tenant_id: str, from_: datetime, to: datetime
+# ) -> list[dict[str, Any]]:
+#     def _produce():
+#         rows = list(
+#             master.execute(
+#                 select(UsageMetric)
+#                 .where(
+#                     (UsageMetric.tenantId == tenant_id)
+#                     & (UsageMetric.periodStart >= from_)
+#                     & (UsageMetric.periodEnd <= to)
+#                 )
+#                 .order_by(UsageMetric.periodStart.asc())
+#             ).scalars()
+#         )
+#         return [
+#             {
+#                 "period": m.periodStart.strftime("%Y-%m"),
+#                 "periodStart": m.periodStart.isoformat(),
+#                 "periodEnd": m.periodEnd.isoformat(),
+#                 "conversationsProcessed": m.conversationsProcessed,
+#                 "aiTokensUsed": int(m.aiTokensUsed),
+#                 "aiCostCents": m.aiCostCents,
+#                 "aiCostDollars": m.aiCostCents / 100,
+#                 "activeUsers": m.activeUsers,
+#             }
+#             for m in rows
+#         ]
+# 
+#     return _cached(tenant_id, "ai_usage_trends", from_, to, _produce)
 
 
 def qa_reviewer_performance(

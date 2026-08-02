@@ -15,6 +15,67 @@ def _is_critical(item: Any) -> bool:
     return item.get("isCritical") is True or item.get("critical") is True
 
 
+def _is_question_visible(q: dict[str, Any], answers: dict[str, dict[str, Any]]) -> bool:
+    cond = q.get("conditionalLogic") or q.get("conditional_logic")
+    if not cond:
+        return True
+    
+    show_if = cond.get("showIf") or cond.get("show_if")
+    if not show_if:
+        return True
+        
+    question_key = show_if.get("questionKey") or show_if.get("question_key")
+    operator = show_if.get("operator", "eq")
+    raw_target_val = show_if.get("value")
+    
+    if not question_key:
+        return True
+        
+    ans_record = answers.get(question_key)
+    if not ans_record:
+        return False
+        
+    answer_val = ans_record.get("value")
+    if answer_val is None:
+        return False
+
+    def normalize(v: Any) -> Any:
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            if v.lower() == "true":
+                return True
+            if v.lower() == "false":
+                return False
+        try:
+            n = float(v)
+            if n.is_integer():
+                return int(n)
+            return n
+        except (ValueError, TypeError):
+            return str(v)
+
+    a = normalize(answer_val)
+    b = normalize(raw_target_val)
+    
+    if operator == "eq":
+        return a == b
+    if operator == "neq":
+        return a != b
+    if operator == "gt":
+        try:
+            return float(a) > float(b)
+        except (ValueError, TypeError):
+            return False
+    if operator == "lt":
+        try:
+            return float(a) < float(b)
+        except (ValueError, TypeError):
+            return False
+            
+    return True
+
+
 def _scale_value(value: float, mn: float, mx: float, scale: float) -> float:
     if mx <= mn:
         return min(max(value, 0), scale)
@@ -87,6 +148,7 @@ def score(
 
     for section in sections:
         qs = questions_by_section.get(section["id"], [])
+        qs = [q for q in qs if _is_question_visible(q, answers)]
         if not qs:
             continue
         total_q_weight = sum(q.get("weight", 0) for q in qs)

@@ -110,7 +110,7 @@ def get_verifier_queue(
 def get_escalation_queue(
     payload: Annotated[dict, Depends(get_current_payload)],
     rid: Annotated[str, Depends(get_request_id)],
-    _r: Annotated[None, Depends(require_roles(UserRole.ADMIN, UserRole.VERIFIER))] = None,
+    _r: Annotated[None, Depends(require_roles(UserRole.ADMIN))] = None,
     page: Annotated[int, Query(ge=1)] = 1,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     search: Annotated[str | None, Query()] = None,
@@ -133,7 +133,7 @@ def get_escalation_queue(
 def get_audit_queue(
     payload: Annotated[dict, Depends(get_current_payload)],
     rid: Annotated[str, Depends(get_request_id)],
-    _r: Annotated[None, Depends(require_roles(UserRole.ADMIN, UserRole.VERIFIER))] = None,
+    _r: Annotated[None, Depends(require_roles(UserRole.ADMIN))] = None,
     page: Annotated[int, Query(ge=1)] = 1,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     search: Annotated[str | None, Query()] = None,
@@ -172,7 +172,7 @@ def preview_score(
 @router.get("/audit/export")
 def export_audit_csv(
     payload: Annotated[dict, Depends(get_current_payload)],
-    _r: Annotated[None, Depends(require_roles(UserRole.ADMIN, UserRole.VERIFIER))] = None,
+    _r: Annotated[None, Depends(require_roles(UserRole.ADMIN))] = None,
     from_: Annotated[str | None, Query(alias="from")] = None,
     to: Annotated[str | None, Query()] = None,
     evaluationId: Annotated[str | None, Query()] = None,
@@ -232,7 +232,7 @@ def get_audit(
     eval_id: str,
     payload: Annotated[dict, Depends(get_current_payload)],
     rid: Annotated[str, Depends(get_request_id)],
-    _r: Annotated[None, Depends(require_roles(UserRole.ADMIN, UserRole.VERIFIER))] = None,
+    _r: Annotated[None, Depends(require_roles(UserRole.ADMIN))] = None,
 ):
     tenant_id = payload["tenantId"]
     log.info("[%s] Fetching audit log for tenant: %s, eval_id: %s", rid, tenant_id, eval_id)
@@ -422,7 +422,7 @@ def resolve_audit_case(
     body: ResolveAuditCaseRequest,
     payload: Annotated[dict, Depends(get_current_payload)],
     rid: Annotated[str, Depends(get_request_id)],
-    _r: Annotated[None, Depends(require_roles(UserRole.ADMIN, UserRole.VERIFIER))] = None,
+    _r: Annotated[None, Depends(require_roles(UserRole.ADMIN))] = None,
 ):
     tenant_id = payload["tenantId"]
     log.info("[%s] Resolving audit case for tenant: %s, audit_case_id: %s (dismiss=%s)", rid, tenant_id, audit_case_id, body.dismiss)

@@ -24,24 +24,39 @@ def list_conversations(
     rid: Annotated[str, Depends(get_request_id)],
     status: str | None = Query(None),
     agentId: str | None = Query(None),
+    agentName: str | None = Query(None),
     search: str | None = Query(None),
+    scoreCategory: str | None = Query(None),
+    fromDate: str | None = Query(None),
+    toDate: str | None = Query(None),
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
 ):
     tenant_id = payload["tenantId"]
     log.info(
-        "[%s] Listing conversations for tenant: %s (status=%s, agentId=%s, search=%s, page=%s)",
+        "[%s] Listing conversations for tenant: %s (status=%s, agentId=%s, agentName=%s, search=%s, page=%s)",
         rid,
         tenant_id,
         status,
         agentId,
+        agentName,
         search,
         page,
     )
     result = svc.list_conversations(
         db,
         tenant_id,
-        {"status": status, "agentId": agentId, "search": search, "page": page, "limit": limit},
+        {
+            "status": status,
+            "agentId": agentId,
+            "agentName": agentName,
+            "search": search,
+            "scoreCategory": scoreCategory,
+            "fromDate": fromDate,
+            "toDate": toDate,
+            "page": page,
+            "limit": limit
+        },
         role=payload["role"],
         user_id=payload["sub"],
     )

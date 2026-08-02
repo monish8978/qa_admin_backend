@@ -61,14 +61,32 @@ class PatchEscalationRequest(BaseModel):
     staleQueueHours: int | None = None
 
 
+class ScoreBucket(BaseModel):
+    id: str
+    name: str
+    min: float
+    max: float
+    color: str | None = "blue"
+
+
 class BlindReviewResponse(BaseModel):
     hideAgentFromQA: bool
     hideQAFromVerifier: bool
+    bestThreshold: float
+    goodThreshold: float
+    avgThreshold: float
+    poorThreshold: float
+    scoreBuckets: list[ScoreBucket]
 
 
 class PatchBlindReviewRequest(BaseModel):
     hideAgentFromQA: bool | None = None
     hideQAFromVerifier: bool | None = None
+    bestThreshold: float | None = None
+    goodThreshold: float | None = None
+    avgThreshold: float | None = None
+    poorThreshold: float | None = None
+    scoreBuckets: list[ScoreBucket] | None = None
 
 
 class UpsertEmailSettingsRequest(BaseModel):

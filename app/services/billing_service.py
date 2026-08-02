@@ -106,6 +106,7 @@ def get_subscription(db: Session, tenant_id: str) -> dict[str, Any]:
             "name": tenant.name,
             "plan": tenant.plan,
             "status": tenant.status,
+            "pendingPlan": tenant.pendingPlan,
         },
         "subscription": None
         if sub is None
@@ -175,7 +176,14 @@ def get_usage(db: Session, tenant_id: str) -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
 
-    limits = PLAN_LIMITS_BILLING.get(tenant.plan, PLAN_LIMITS_BILLING["BASIC"])
+    limits = PLAN_LIMITS_BILLING.get(tenant.plan, PLAN_LIMITS_BILLING["BASIC"]).copy()
+    if tenant.customConversationsLimit is not None:
+        limits["conversations"] = tenant.customConversationsLimit
+    if tenant.customUsersLimit is not None:
+        limits["users"] = tenant.customUsersLimit
+    if tenant.customFormsLimit is not None:
+        limits["forms"] = tenant.customFormsLimit
+
 
     return {
         "period": {

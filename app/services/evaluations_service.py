@@ -136,6 +136,8 @@ def _eval_for_queue(row: Evaluation, conv: Conversation | None) -> dict[str, Any
         "verifierRejectedAt": row.verifierRejectedAt,
         "formDefinitionId": row.formDefinitionId,
         "formVersion": row.formVersion,
+        "qaUserId": row.qaUserId,
+        "verifierUserId": row.verifierUserId,
         "conversation": _conversation_dict(conv),
     }
 
@@ -214,6 +216,7 @@ def _upsert_queue(
             existing.departmentId = department_id
         existing.assignedTo = assigned_to
         existing.priority = priority
+        existing.createdAt = datetime.now(timezone.utc)
     else:
         ts.add(
             WorkflowQueue(
@@ -343,7 +346,9 @@ def _queue_listing(
     skip = (page - 1) * limit
     pool = get_tenant_pool()
     with pool.session(tenant_id) as ts:
-        q = select(Evaluation).where(Evaluation.workflowState.in_(workflow_states))
+        q = select(Evaluation).where(
+            Evaluation.workflowState.in_(workflow_states)
+        ).where(Evaluation.isEscalated.is_(False))
         if role == "QA" and user_id:
             q = q.where(or_(Evaluation.qaUserId == user_id, Evaluation.qaUserId.is_(None)))
         elif role == "VERIFIER" and user_id:
@@ -364,10 +369,31 @@ def _queue_listing(
                 .limit(limit)
             ).scalars()
         )
+        from ..db import SessionLocal
+        from ..models.master import BlindReviewSettings
+        with SessionLocal() as master_session:
+            blind = master_session.execute(
+                select(BlindReviewSettings).where(BlindReviewSettings.tenantId == tenant_id)
+            ).scalar_one_or_none()
+
         items: list[dict[str, Any]] = []
         for row in rows:
             conv = ts.get(Conversation, row.conversationId)
             queue = _get_queue_for(ts, row.id)
+            conv_dict = _conversation_dict(conv)
+            if conv_dict and blind and getattr(blind, "hideAgentFromQA", False) and role == "QA":
+                source = conv_dict.get("agentId") or conv_dict.get("agentName") or conv_dict.get("id")
+                alias = _deterministic_alias(tenant_id, "agent", str(source))
+                conv_dict["agentId"] = alias
+                conv_dict["agentName"] = alias
+
+            qa_score_val = row.qaScore
+            qa_user_val = row.qaUserId
+            if blind and getattr(blind, "hideQAFromVerifier", False) and role == "VERIFIER":
+                qa_score_val = None
+                if row.qaUserId:
+                    qa_user_val = _deterministic_alias(tenant_id, "qa", str(row.qaUserId))
+
             items.append(
                 {
                     "id": queue.id if queue else f"{queue_type.lower()}-{row.id}",
@@ -384,7 +410,7 @@ def _queue_listing(
                         "id": row.id,
                         "workflowState": row.workflowState,
                         "aiScore": row.aiScore,
-                        "qaScore": row.qaScore,
+                        "qaScore": qa_score_val,
                         **(
                             {
                                 "verifierRejectReason": row.verifierRejectReason,
@@ -395,7 +421,9 @@ def _queue_listing(
                         ),
                         "formDefinitionId": row.formDefinitionId,
                         "formVersion": row.formVersion,
-                        "conversation": _conversation_dict(conv),
+                        "qaUserId": qa_user_val,
+                        "verifierUserId": row.verifierUserId,
+                        "conversation": conv_dict,
                     },
                 }
             )
@@ -944,10 +972,7 @@ def qa_submit(
                 return False
             return (vmin_s <= score_val <= vmin_e) or (vmax_s <= score_val <= vmax_e)
 
-        if ev.aiScore is None:
-            should_send_to_verifier = True
-        else:
-            should_send_to_verifier = _in_verifier_range(result["overallScore"]) or _in_verifier_range(ev.aiScore)
+        should_send_to_verifier = _in_verifier_range(result["overallScore"])
             
         should_auto_complete = not should_escalate and not should_send_to_verifier
 
@@ -1942,6 +1967,7 @@ def manual_assign(
             ev.workflowState = WorkflowState.QA_IN_PROGRESS.value
             ev.qaUserId = target_user_id
             ev.qaStartedAt = ev.qaStartedAt or now
+            ev.isEscalated = False
             _upsert_queue(
                 ts,
                 evaluation_id=evaluation_id,
@@ -1954,6 +1980,7 @@ def manual_assign(
             ev.workflowState = WorkflowState.VERIFIER_IN_PROGRESS.value
             ev.verifierUserId = target_user_id
             ev.verifierStartedAt = ev.verifierStartedAt or now
+            ev.isEscalated = False
             _upsert_queue(
                 ts,
                 evaluation_id=evaluation_id,
@@ -2139,6 +2166,7 @@ def reassign(
             )
         previous_user_id = ev.qaUserId if is_qa_progress else ev.verifierUserId
         now = datetime.now(timezone.utc)
+        ev.isEscalated = False
         if is_qa_progress:
             ev.qaUserId = new_user_id
             ev.qaStartedAt = now
@@ -2149,9 +2177,9 @@ def reassign(
             assignment_type = "verifier"
         ts.execute(
             text(
-                'UPDATE workflow_queues SET "assignedTo" = :uid WHERE "evaluationId" = :eid'
+                'UPDATE workflow_queues SET "assignedTo" = :uid, "createdAt" = :now WHERE "evaluationId" = :eid'
             ),
-            {"uid": new_user_id, "eid": evaluation_id},
+            {"uid": new_user_id, "now": now, "eid": evaluation_id},
         )
         _add_audit(
             ts,

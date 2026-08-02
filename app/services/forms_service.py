@@ -45,12 +45,12 @@ def _tenant_db_has_department_id(db: Session) -> bool:
     )
 
 
-def _enforce_plan_limit(db: Session, plan: str) -> None:
+def _enforce_plan_limit(db: Session, plan: str, custom_forms_limit: int | None = None) -> None:
     try:
         limits = PLAN_LIMITS[PlanType(plan)]
     except (ValueError, KeyError):
         limits = PLAN_LIMITS[PlanType.BASIC]
-    max_forms = limits.get("forms", PLAN_LIMITS[PlanType.BASIC]["forms"])
+    max_forms = custom_forms_limit if custom_forms_limit is not None else limits.get("forms", PLAN_LIMITS[PlanType.BASIC]["forms"])
     total = db.execute(
         select(func.count()).select_from(FormDefinition).where(
             FormDefinition.status != "ARCHIVED"
@@ -144,6 +144,7 @@ def create_form(
     db: Session,
     *,
     plan: str,
+    custom_forms_limit: int | None = None,
     created_by_id: str,
     form_key: str,
     name: str,
@@ -160,7 +161,7 @@ def create_form(
     if not name:
         raise bad_request("INVALID_NAME", "name is required")
 
-    _enforce_plan_limit(db, plan)
+    _enforce_plan_limit(db, plan, custom_forms_limit=custom_forms_limit)
     norm_channels = _validate_channels(channels)
     has_dept_col = _tenant_db_has_department_id(db)
 

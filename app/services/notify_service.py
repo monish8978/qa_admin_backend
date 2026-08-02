@@ -23,7 +23,17 @@ from ..models.master import TenantEmailSettings
 
 log = logging.getLogger("qa.notify")
 
-TemplateKey = Literal["tenant_ready", "user_invited", "password_reset"]
+TemplateKey = Literal[
+    "tenant_ready",
+    "user_invited",
+    "password_reset",
+    "mfa_otp",
+    "signup_otp",
+    "tenant_signup_admin_alert",
+    "tenant_approved",
+    "user_created",
+    "plan_upgrade_request",
+]
 
 
 @dataclass
@@ -40,21 +50,136 @@ class _Mailer:
 
 # ─── template rendering ───────────────────────────────────────────────────────
 
+def _wrap_html(title: str, content_html: str) -> str:
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{title}</title>
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background-color: #f8fafc;
+      color: #334155;
+      margin: 0;
+      padding: 0;
+      -webkit-font-smoothing: antialiased;
+    }}
+    .wrapper {{
+      width: 100%;
+      background-color: #f8fafc;
+      padding: 40px 0;
+    }}
+    .container {{
+      max-width: 570px;
+      margin: 0 auto;
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      border-radius: 16px;
+      box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+      overflow: hidden;
+    }}
+    .header {{
+      background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+      padding: 32px;
+      text-align: center;
+    }}
+    .header h1 {{
+      color: #ffffff;
+      font-size: 24px;
+      font-weight: 700;
+      margin: 0;
+      letter-spacing: -0.025em;
+    }}
+    .content {{
+      padding: 40px;
+      line-height: 1.6;
+    }}
+    .content p {{
+      margin: 0 0 20px 0;
+      font-size: 16px;
+      color: #475569;
+    }}
+    .btn {{
+      display: inline-block;
+      background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+      color: #ffffff !important;
+      text-decoration: none;
+      padding: 12px 30px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 15px;
+      margin: 10px 0 20px 0;
+      text-align: center;
+      box-shadow: 0 4px 10px rgba(79, 70, 229, 0.2);
+    }}
+    .otp-container {{
+      background-color: #f1f5f9;
+      border-radius: 12px;
+      padding: 20px;
+      text-align: center;
+      margin: 20px 0;
+      border: 1px dashed #cbd5e1;
+    }}
+    .otp-code {{
+      font-size: 32px;
+      font-weight: 800;
+      letter-spacing: 0.15em;
+      color: #4f46e5;
+      margin: 0;
+    }}
+    .footer {{
+      padding: 24px 40px;
+      background-color: #f8fafc;
+      border-top: 1px solid #e2e8f0;
+      text-align: center;
+      font-size: 12px;
+      color: #64748b;
+    }}
+    .footer p {{
+      margin: 0;
+    }}
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="container">
+      <div class="header">
+        <h1>{title}</h1>
+      </div>
+      <div class="content">
+        {content_html}
+      </div>
+      <div class="footer">
+        <p>© 2026 QA Platform. All rights reserved.</p>
+      </div>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
 def _render(template: TemplateKey, ctx: dict[str, Any]) -> tuple[str, str, str]:
     """Return (subject, html, text)."""
     if template == "tenant_ready":
         name = ctx.get("name", "there")
         login = ctx.get("loginUrl", "")
-        subject = "Your QA Platform workspace is ready"
+        subject = "Your QA Platform Workspace is Ready"
         text = (
             f"Hi {name},\n\nYour QA Platform workspace has been provisioned and is ready to use.\n"
             f"Sign in: {login}\n\nThe QA Platform team"
         )
-        html = (
-            f"<p>Hi {name},</p>"
-            f"<p>Your QA Platform workspace has been provisioned and is ready to use.</p>"
-            f"<p><a href=\"{login}\">Open the dashboard</a></p>"
-            f"<p>— The QA Platform team</p>"
+        html = _wrap_html(
+            title="Workspace Ready",
+            content_html=(
+                f"<p>Hi {name},</p>"
+                f"<p>Great news! Your QA Platform workspace has been provisioned and is ready for use.</p>"
+                f"<p>Click the button below to sign in and begin your quality operations:</p>"
+                f'<div style="text-align: center;"><a href="{login}" class="btn">Open Dashboard</a></div>'
+                f"<p>If you have any questions, feel free to contact our support team.</p>"
+                
+            )
         )
         return subject, html, text
 
@@ -67,11 +192,16 @@ def _render(template: TemplateKey, ctx: dict[str, Any]) -> tuple[str, str, str]:
             f"Hi {name},\n\n{inviter} invited you to QA Platform.\n"
             f"Accept your invitation: {accept}\n\nThis link expires in 7 days."
         )
-        html = (
-            f"<p>Hi {name},</p>"
-            f"<p><strong>{inviter}</strong> invited you to QA Platform.</p>"
-            f"<p><a href=\"{accept}\">Accept invitation</a></p>"
-            f"<p><em>This link expires in 7 days.</em></p>"
+        html = _wrap_html(
+            title="Team Invitation",
+            content_html=(
+                f"<p>Hi {name},</p>"
+                f"<p><strong>{inviter}</strong> has invited you to join the <strong>QA Platform</strong> workspace.</p>"
+                f"<p>Click the button below to accept the invitation and set up your account password:</p>"
+                f'<div style="text-align: center;"><a href="{accept}" class="btn">Accept Invitation</a></div>'
+                f"<p><em>Note: This invitation link is secure and will expire in 7 days.</em></p>"
+                
+            )
         )
         return subject, html, text
 
@@ -84,11 +214,165 @@ def _render(template: TemplateKey, ctx: dict[str, Any]) -> tuple[str, str, str]:
             f"Reset link (valid for 15 minutes): {reset}\n\n"
             f"If you didn't request this, you can ignore this email."
         )
-        html = (
-            f"<p>Hi {name},</p>"
-            f"<p>We received a request to reset your password.</p>"
-            f"<p><a href=\"{reset}\">Reset password</a> (valid for 15 minutes)</p>"
-            f"<p><em>If you didn't request this, you can ignore this email.</em></p>"
+        html = _wrap_html(
+            title="Password Reset Request",
+            content_html=(
+                f"<p>Hi {name},</p>"
+                f"<p>We received a request to reset the password for your QA Platform account.</p>"
+                f"<p>To complete your password reset, click the button below:</p>"
+                f'<div style="text-align: center; margin: 24px 0;"><a href="{reset}" style="display: inline-block; background-color: #111827; color: #ffffff !important; text-decoration: none; padding: 12px 32px; border-radius: 8px; font-weight: 600; font-size: 15px; text-align: center; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, sans-serif;">Reset Password</a></div>'
+                f"<p><em>Note: This link will expire in 15 minutes. If you did not make this request, you can safely ignore this email.</em></p>"
+                f"<p>Best regards,<br><strong>The QA Platform Team</strong></p>"
+            )
+        )
+        return subject, html, text
+
+    if template == "mfa_otp":
+        otp = ctx.get("otp", "")
+        subject = f"Your QA Platform Verification Code: {otp}"
+        text = (
+            f"Hi,\n\nYour verification code is: {otp}\n\n"
+            f"This code will expire in 5 minutes.\n"
+            f"If you did not request this, please ignore this email."
+        )
+        html = _wrap_html(
+            title="Two-Factor Authentication",
+            content_html=(
+                f"<p>Hi,</p>"
+                f"<p>To complete your sign-in, please enter the following verification code (OTP):</p>"
+                f'<div class="otp-container"><p class="otp-code">{otp}</p></div>'
+                f"<p><em>Note: This code is valid for 5 minutes. If you did not attempt to sign in to your account, please ignore this email.</em></p>"
+                
+            )
+        )
+        return subject, html, text
+
+    if template == "signup_otp":
+        otp = ctx.get("otp", "")
+        subject = f"Verify your email for QA Platform: {otp}"
+        text = (
+            f"Hi,\n\nYour email verification code is: {otp}\n\n"
+            f"This code will expire in 5 minutes.\n"
+            f"If you did not request this, please ignore this email."
+        )
+        html = _wrap_html(
+            title="Email Verification",
+            content_html=(
+                f"<p>Hi,</p>"
+                f"<p>Thank you for starting your registration with QA Platform. Please verify your email address by entering the following code (OTP):</p>"
+                f'<div class="otp-container"><p class="otp-code">{otp}</p></div>'
+                f"<p><em>Note: This code is valid for 5 minutes. If you did not request this, please ignore this email.</em></p>"
+                
+            )
+        )
+        return subject, html, text
+
+    if template == "tenant_signup_admin_alert":
+        tenant_name = ctx.get("tenantName", "")
+        tenant_slug = ctx.get("tenantSlug", "")
+        admin_name = ctx.get("adminName", "")
+        admin_email = ctx.get("adminEmail", "")
+        plan = ctx.get("plan", "")
+        subject = f"New Tenant Registration: {tenant_name}"
+        text = (
+            f"New Tenant Registered:\n\n"
+            f"Tenant Name: {tenant_name}\n"
+            f"Workspace Slug: {tenant_slug}\n"
+            f"Admin Name: {admin_name}\n"
+            f"Admin Email: {admin_email}\n"
+            f"Selected Plan: {plan}\n\n"
+            f"This is an automated notification. The workspace has been automatically activated."
+        )
+        html = _wrap_html(
+            title="New Tenant Registration",
+            content_html=(
+                f"<p>A new tenant has registered and their workspace has been automatically activated.</p>"
+                f'<table style="width: 100%; border-collapse: collapse; margin: 20px 0; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden;">'
+                f'<tr style="background-color: #f8fafc;"><td style="padding: 10px; border-bottom: 1px solid #e2e8f0; font-weight: bold;">Tenant Name</td><td style="padding: 10px; border-bottom: 1px solid #e2e8f0;">{tenant_name}</td></tr>'
+                f'<tr><td style="padding: 10px; border-bottom: 1px solid #e2e8f0; font-weight: bold;">Workspace Slug</td><td style="padding: 10px; border-bottom: 1px solid #e2e8f0;">{tenant_slug}</td></tr>'
+                f'<tr style="background-color: #f8fafc;"><td style="padding: 10px; border-bottom: 1px solid #e2e8f0; font-weight: bold;">Admin Name</td><td style="padding: 10px; border-bottom: 1px solid #e2e8f0;">{admin_name}</td></tr>'
+                f'<tr><td style="padding: 10px; border-bottom: 1px solid #e2e8f0; font-weight: bold;">Admin Email</td><td style="padding: 10px; border-bottom: 1px solid #e2e8f0;">{admin_email}</td></tr>'
+                f'<tr style="background-color: #f8fafc;"><td style="padding: 10px; font-weight: bold;">Selected Plan</td><td style="padding: 10px;">{plan}</td></tr>'
+                f"</table>"
+                f"<p>No action is required from your side.</p>"
+            )
+        )
+        return subject, html, text
+
+    if template == "tenant_approved":
+        tenant_name = ctx.get("tenantName", "")
+        name = ctx.get("name", "there")
+        subject = f"Your QA Platform Workspace is Approved"
+        text = (
+            f"Hi {name},\n\n"
+            f"Your QA Platform workspace '{tenant_name}' has been approved by the administrator.\n"
+            f"You can now login to your account.\n\n"
+            f"Best regards,\nThe QA Platform Team"
+        )
+        html = _wrap_html(
+            title="Workspace Approved",
+            content_html=(
+                f"<p>Hi {name},</p>"
+                f"<p>Congratulations! Your QA Platform workspace <strong>{tenant_name}</strong> has been approved by the administrator.</p>"
+                f"<p>Your account is now active and you can log in to your dashboard.</p>"
+                f'<div style="text-align: center; margin: 24px 0;"><a href="{ctx.get("loginUrl", "")}" style="display: inline-block; background-color: #111827; color: #ffffff !important; text-decoration: none; padding: 12px 32px; border-radius: 8px; font-weight: 600; font-size: 15px; text-align: center; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, sans-serif;">Go to Dashboard</a></div>'
+                f"<p>Best regards,<br><strong>The QA Platform Team</strong></p>"
+            )
+        )
+        return subject, html, text
+
+    if template == "user_created":
+        name = ctx.get("name", "there")
+        email = ctx.get("email", "")
+        password = ctx.get("password", "")
+        dashboard_url = ctx.get("dashboardUrl", "")
+        subject = "Welcome to QA Platform - Your Account Details"
+        text = (
+            f"Hi {name},\n\n"
+            f"An account has been created for you on QA Platform.\n\n"
+            f"Here are your login credentials:\n"
+            f"Email (Username): {email}\n"
+            f"Password: {password}\n\n"
+            f"You can sign in to your dashboard here: {dashboard_url}\n\n"
+            f"For security, please use the 'Forgot Password' option on the sign-in page to set a new password as soon as possible.\n\n"
+            f"Best regards,\nThe QA Platform Team"
+        )
+        html = _wrap_html(
+            title="Account Created",
+            content_html=(
+                f"<p>Hi {name},</p>"
+                f"<p>An account has been created for you on the <strong>QA Platform</strong>.</p>"
+                f"<p>Here are your access details:</p>"
+                f'<table style="width: 100%; border-collapse: collapse; margin: 20px 0; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden;">'
+                f'<tr style="background-color: #f8fafc;"><td style="padding: 12px; border-bottom: 1px solid #e2e8f0; font-weight: bold; font-size: 14px;">Email (Username)</td><td style="padding: 12px; border-bottom: 1px solid #e2e8f0; font-family: monospace; font-size: 14px; color: #334155;">{email}</td></tr>'
+                f'<tr><td style="padding: 12px; font-weight: bold; font-size: 14px;">Temporary Password</td><td style="padding: 12px; font-family: monospace; font-size: 14px; color: #334155;">{password}</td></tr>'
+                f"</table>"
+                f"<p>Click the button below to sign in and open your dashboard:</p>"
+                f'<div style="text-align: center; margin: 24px 0;"><a href="{dashboard_url}" style="display: inline-block; background-color: #111827; color: #ffffff !important; text-decoration: none; padding: 12px 32px; border-radius: 8px; font-weight: 600; font-size: 15px; text-align: center; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, sans-serif;">Open Dashboard</a></div>'
+                f"<p><em>Note: For security, please use the <strong>Forgot Password</strong> option on the sign-in page to set a new password.</em></p>"
+                f"<p>Best regards,<br><strong>The QA Platform Team</strong></p>"
+            )
+        )
+        return subject, html, text
+
+    if template == "plan_upgrade_request":
+        user_email = ctx.get("user_email", "User")
+        tenant_id = ctx.get("tenant_id", "")
+        requested_plan = ctx.get("requested_plan", "")
+        subject = f"Plan Upgrade Request: Tenant {tenant_id} -> {requested_plan}"
+        text = (
+            f"Hello Admin,\n\n"
+            f"User {user_email} from Tenant Workspace ({tenant_id}) has requested a plan upgrade to {requested_plan}.\n\n"
+            f"Please review this request in Super Admin portal.\n\n"
+            f"Best regards,\nQA Platform System"
+        )
+        html = _wrap_html(
+            title="Plan Upgrade Request",
+            content_html=(
+                f"<p>Hello Admin,</p>"
+                f"<p>User <strong>{user_email}</strong> from Tenant Workspace <strong>{tenant_id}</strong> has requested a plan upgrade to <strong>{requested_plan}</strong>.</p>"
+                f"<p>Please review this request in the Super Admin portal.</p>"
+            )
         )
         return subject, html, text
 
@@ -211,16 +495,33 @@ def send_notification(
 
 
 # Backwards-compatible shim for the original auth_service stub call site.
-def send_email(*, to: str, template: str, data: dict, master: Session | None = None,
-               tenant_id: str | None = None) -> None:
+def send_email(
+    to: str,
+    subject: str = "",
+    body: str = "",
+    *,
+    template: str | None = None,
+    data: dict | None = None,
+    master: Session | None = None,
+    tenant_id: str | None = None,
+) -> None:
     if master is None:
-        log.info("notify(stub-call): template=%s to=%s data_keys=%s",
-                 template, to, list(data.keys()))
+        log.info("notify(send_email): to=%s subject=%s template=%s", to, subject, template)
         return
-    send_notification(
-        master,
-        template=template,  # type: ignore[arg-type]
-        to=to,
-        context=data,
-        tenant_id=tenant_id,
-    )
+    if template:
+        send_notification(
+            master,
+            template=template,  # type: ignore[arg-type]
+            to=to,
+            context=data or {},
+            tenant_id=tenant_id,
+        )
+    else:
+        mailer = _resolve_mailer(master, tenant_id)
+        if mailer is None:
+            log.info("notify: no mailer configured for direct email to=%s", to)
+            return
+        try:
+            _send(mailer, to, subject, _wrap_html(subject, f"<p>{body}</p>"), body)
+        except Exception:
+            log.warning("notify: direct send failed for to=%s", to, exc_info=True)

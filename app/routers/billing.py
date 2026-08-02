@@ -20,9 +20,11 @@ from ..schemas.billing import (
     CreatePortalSessionRequest,
 )
 from ..services import billing_service as svc
+from ..config import get_settings
 
 router = APIRouter(prefix="/billing", tags=["billing"])
 log = logging.getLogger("qa.api.routers.billing")
+_settings = get_settings()
 
 
 @router.get("")
@@ -88,24 +90,50 @@ def create_portal(
     return build_response(res, rid)
 
 
+@router.post("/request-upgrade")
 @router.post("/change-plan")
 @router.post("/stripe/change-plan")
 def change_plan(
     body: ChangePlanRequest,
-    payload: Annotated[dict, Depends(require_roles(UserRole.ADMIN))],
+    payload: Annotated[dict, Depends(get_current_payload)],
     db: Annotated[Session, Depends(get_db)],
     rid: Annotated[str, Depends(get_request_id)],
 ):
-    tenant_id = payload["tenantId"]
-    log.info("[%s] Changing plan for tenant: %s to %s", rid, tenant_id, body.plan)
-    res = svc.change_plan(
-        db,
-        tenant_id,
-        plan=body.plan,
-        proration_behavior=body.prorationBehavior,
-    )
-    log.info("[%s] Successfully changed plan for tenant: %s to %s", rid, tenant_id, body.plan)
-    return build_response(res, rid)
+    tenant_id = payload.get("tenantId", "unknown")
+    user_email = payload.get("sub") or payload.get("email") or "User"
+    requested_plan = body.plan
+    log.info("[%s] Upgrade request from tenant %s (%s) for plan: %s", rid, tenant_id, user_email, requested_plan)
+    
+    try:
+        from ..services import notify_service
+        notify_service.send_email(
+            to=_settings.EMAIL_FROM,
+            template="plan_upgrade_request",
+            data={
+                "user_email": user_email,
+                "tenant_id": tenant_id,
+                "requested_plan": requested_plan,
+            },
+            master=db,
+            tenant_id=tenant_id,
+        )
+        
+        # Update the database so Super Admin sees it in notifications
+        if tenant_id and tenant_id != "unknown":
+            from ..models.master import Tenant
+            tenant = db.get(Tenant, tenant_id)
+            if tenant:
+                tenant.pendingPlan = requested_plan
+                db.commit()
+
+    except Exception as e:
+        log.warning("[%s] Email send to admin skipped/failed: %s", rid, e)
+
+    return build_response({
+        "status": "success",
+        "message": "Thank you for your upgrade request. Our team will reach out to you shortly to assist you further.",
+        "requestedPlan": requested_plan,
+    }, rid)
 
 
 @router.post("/cancel")
@@ -149,3 +177,46 @@ async def stripe_webhook(
     res = svc.handle_stripe_webhook(db, stripe_signature, raw)
     log.info("[%s] Successfully processed Stripe webhook response: %s", rid, res)
     return build_response(res, rid)
+
+
+@router.post("/request-upgrade")
+def request_upgrade(
+    body: ChangePlanRequest,
+    payload: Annotated[dict, Depends(get_current_payload)],
+    db: Annotated[Session, Depends(get_db)],
+    rid: Annotated[str, Depends(get_request_id)],
+):
+    tenant_id = payload.get("tenantId", "unknown")
+    user_email = payload.get("sub") or payload.get("email") or "User"
+    requested_plan = body.plan
+    log.info("[%s] Upgrade request from tenant %s (%s) for plan: %s", rid, tenant_id, user_email, requested_plan)
+    
+    # Save pending request to db
+    from sqlalchemy import select
+    from ..models.master import Tenant
+    tenant = db.execute(select(Tenant).where(Tenant.id == tenant_id)).scalar_one_or_none()
+    if tenant:
+        tenant.pendingPlan = requested_plan
+        db.commit()
+
+    try:
+        from ..services import notify_service
+        notify_service.send_email(
+            to=_settings.EMAIL_FROM,
+            template="plan_upgrade_request",
+            data={
+                "user_email": user_email,
+                "tenant_id": tenant_id,
+                "requested_plan": requested_plan,
+            },
+            master=db,
+            tenant_id=tenant_id,
+        )
+    except Exception as e:
+        log.warning("[%s] Email send to admin skipped/failed: %s", rid, e)
+
+    return build_response({
+        "status": "success",
+        "message": "Thank you for your upgrade request. Our team will reach out to you shortly to assist you further.",
+        "requestedPlan": requested_plan,
+    }, rid)

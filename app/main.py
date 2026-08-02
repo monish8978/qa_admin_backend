@@ -38,6 +38,7 @@ from .routers import (
     health,
     llm_config,
     outbound_webhooks,
+    platform_admin,
     routing,
     tenant_settings,
     users,
@@ -80,10 +81,9 @@ def _build_app() -> FastAPI:
     # In production, allow the deployed web app (WEB_URL) and the API origin.
     # Using "*" with allow_credentials=True is invalid per the CORS spec, so we
     # enumerate explicit origins instead.
-    prod_origins = list(dict.fromkeys(o for o in (settings.WEB_URL, settings.API_URL) if o))
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=prod_origins if is_prod else ["*"],
+        allow_origin_regex=r"https?://.*",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -173,6 +173,7 @@ def _build_app() -> FastAPI:
     app.include_router(forms.router, prefix="/api/v1")
     app.include_router(conversations.router, prefix="/api/v1")
     app.include_router(evaluations.router, prefix="/api/v1")
+    app.include_router(platform_admin.router, prefix="/api/v1")
     app.include_router(routing.router, prefix="/api/v1")
     app.include_router(billing.router, prefix="/api/v1")
     app.include_router(outbound_webhooks.router, prefix="/api/v1")
@@ -190,11 +191,128 @@ def _build_app() -> FastAPI:
         # Auto-create master database schema using SQLAlchemy models
         from .db import engine
         from .models.master import Base
+        from sqlalchemy import text
         try:
             Base.metadata.create_all(engine)
+            with engine.begin() as conn:
+                conn.execute(text('ALTER TABLE tenants ADD COLUMN IF NOT EXISTS "featureFlags" JSONB DEFAULT \'{}\'::jsonb'))
+                conn.execute(text('ALTER TABLE tenants ADD COLUMN IF NOT EXISTS "pendingPlan" "PlanType"'))
+                conn.execute(text('ALTER TABLE tenants ADD COLUMN IF NOT EXISTS "deletedAt" TIMESTAMP WITH TIME ZONE NULL'))
+                conn.execute(text('ALTER TABLE blind_review_settings ADD COLUMN IF NOT EXISTS "bestThreshold" DOUBLE PRECISION DEFAULT 90.0'))
+                conn.execute(text('ALTER TABLE blind_review_settings ADD COLUMN IF NOT EXISTS "goodThreshold" DOUBLE PRECISION DEFAULT 75.0'))
+                conn.execute(text('ALTER TABLE blind_review_settings ADD COLUMN IF NOT EXISTS "avgThreshold" DOUBLE PRECISION DEFAULT 60.0'))
+                conn.execute(text('ALTER TABLE blind_review_settings ADD COLUMN IF NOT EXISTS "poorThreshold" DOUBLE PRECISION DEFAULT 0.0'))
+                conn.execute(text('ALTER TABLE blind_review_settings ADD COLUMN IF NOT EXISTS "scoreBuckets" JSONB DEFAULT \'[]\'::jsonb'))
+                conn.execute(text('ALTER TABLE users ADD COLUMN IF NOT EXISTS "deletedAt" TIMESTAMP WITH TIME ZONE NULL'))
+                
+                # Create PlatformPlan table if not exists and seed it
+                conn.execute(text('''
+                    CREATE TABLE IF NOT EXISTS platform_plans (
+                        id VARCHAR(25) PRIMARY KEY,
+                        code VARCHAR(50) UNIQUE NOT NULL,
+                        name VARCHAR(100) NOT NULL,
+                        description TEXT,
+                        "priceMonthly" INTEGER NOT NULL DEFAULT 0,
+                        "priceYearly" INTEGER NOT NULL DEFAULT 0,
+                        "conversationsLimit" INTEGER,
+                        "formsLimit" INTEGER,
+                        "usersLimit" INTEGER,
+                        "features" JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        "isActive" BOOLEAN NOT NULL DEFAULT TRUE,
+                        "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                        "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    )
+                '''))
+                
+                # Ensure features column exists on already created tables
+                conn.execute(text('ALTER TABLE platform_plans ADD COLUMN IF NOT EXISTS "features" JSONB NOT NULL DEFAULT \'[]\'::jsonb'))
+                
+                # Insert default plans if table is empty
+                conn.execute(text('''
+                    INSERT INTO platform_plans (id, code, name, "priceMonthly", "priceYearly", "conversationsLimit", "formsLimit", "usersLimit", "features", "isActive")
+                    SELECT 'plan_basic', 'BASIC', 'Free Plan', 0, 0, 500, 3, 5, '["500 Conversations / month", "3 Form Templates", "5 Users & Team Members", "Standard QA Review Queue", "Basic Dashboard Analytics"]'::jsonb, true
+                    WHERE NOT EXISTS (SELECT 1 FROM platform_plans WHERE code = 'BASIC')
+                '''))
+                conn.execute(text('''
+                    INSERT INTO platform_plans (id, code, name, "priceMonthly", "priceYearly", "conversationsLimit", "formsLimit", "usersLimit", "features", "isActive")
+                    SELECT 'plan_pro', 'PRO', 'Pro Plan', 49, 490, 5000, 20, 25, '["5,000 Conversations / month", "20 Form Templates", "25 Users & Team Members", "Advanced AI Evaluation & LLM", "Escalation & Audit Queues"]'::jsonb, true
+                    WHERE NOT EXISTS (SELECT 1 FROM platform_plans WHERE code = 'PRO')
+                '''))
+                conn.execute(text('''
+                    INSERT INTO platform_plans (id, code, name, "priceMonthly", "priceYearly", "conversationsLimit", "formsLimit", "usersLimit", "features", "isActive")
+                    SELECT 'plan_ent', 'ENTERPRISE', 'Enterprise', 199, 1990, NULL, NULL, NULL, '["Unlimited Conversations", "Unlimited Form Templates", "Unlimited Users & Team Members", "Custom LLM Endpoint & Azure OpenAI", "24/7 Dedicated Account Support"]'::jsonb, true
+                    WHERE NOT EXISTS (SELECT 1 FROM platform_plans WHERE code = 'ENTERPRISE')
+                '''))
+
+                # Increase id length for new tables in case they were already created with length 25
+                conn.execute(text('ALTER TABLE platform_audit_logs ALTER COLUMN id TYPE VARCHAR(50)'))
+                conn.execute(text('ALTER TABLE platform_notifications ALTER COLUMN id TYPE VARCHAR(50)'))
+
             log.info("Master database schema initialized successfully")
         except Exception:
             log.warning("Failed to initialize master database schema", exc_info=True)
+
+        # Auto-provision super admin if environment variables are set
+        if settings.AUTO_PROVISION_ADMIN_EMAIL and settings.AUTO_PROVISION_ADMIN_TENANT_SLUG:
+            from .db import SessionLocal
+            from .models.master import Tenant, User, Subscription
+            from .security import hash_password
+            from datetime import datetime, timezone
+
+            session = SessionLocal()
+            try:
+                # Check if Tenant exists
+                tenant = session.query(Tenant).filter(Tenant.slug == settings.AUTO_PROVISION_ADMIN_TENANT_SLUG).first()
+                if not tenant:
+                    log.info("Auto-provisioning workspace '%s' (slug: %s)...", settings.AUTO_PROVISION_ADMIN_TENANT_NAME, settings.AUTO_PROVISION_ADMIN_TENANT_SLUG)
+                    tenant = Tenant(
+                        slug=settings.AUTO_PROVISION_ADMIN_TENANT_SLUG,
+                        name=settings.AUTO_PROVISION_ADMIN_TENANT_NAME,
+                        plan="ENTERPRISE",
+                        status="ACTIVE"
+                    )
+                    session.add(tenant)
+                    session.flush()
+
+                    # Create subscription
+                    now = datetime.now(timezone.utc)
+                    subscription = Subscription(
+                        tenantId=tenant.id,
+                        plan="ENTERPRISE",
+                        status="ACTIVE",
+                        currentPeriodStart=now,
+                        currentPeriodEnd=now,
+                    )
+                    session.add(subscription)
+                    session.flush()
+                
+                # Check if User exists
+                user = session.query(User).filter(User.tenantId == tenant.id, User.email == settings.AUTO_PROVISION_ADMIN_EMAIL).first()
+                if user:
+                    log.info("Super admin user '%s' already exists. Updating credentials/role...", settings.AUTO_PROVISION_ADMIN_EMAIL)
+                    user.role = "ADMIN"
+                    user.status = "ACTIVE"
+                    if not user.passwordHash and settings.AUTO_PROVISION_ADMIN_PASSWORD:
+                        user.passwordHash = hash_password(settings.AUTO_PROVISION_ADMIN_PASSWORD)
+                else:
+                    log.info("Auto-provisioning Super Admin user '%s'...", settings.AUTO_PROVISION_ADMIN_EMAIL)
+                    user = User(
+                        tenantId=tenant.id,
+                        email=settings.AUTO_PROVISION_ADMIN_EMAIL,
+                        name=settings.AUTO_PROVISION_ADMIN_NAME,
+                        passwordHash=hash_password(settings.AUTO_PROVISION_ADMIN_PASSWORD or "SuperAdmin123!"),
+                        role="ADMIN",
+                        status="ACTIVE"
+                    )
+                    session.add(user)
+
+                session.commit()
+                log.info("Super Admin auto-provisioned successfully.")
+            except Exception as e:
+                session.rollback()
+                log.warning("Failed to auto-provision Super Admin", exc_info=True)
+            finally:
+                session.close()
 
         import asyncio
         async def _reap_loop():

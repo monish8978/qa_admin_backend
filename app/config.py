@@ -72,6 +72,14 @@ class Settings(BaseSettings):
     # Internal LLM prompt audit log file (JSONL)
     LLM_PROMPT_LOG_PATH: str | None = None
 
+    # Default Admin Provisioning
+    AUTO_PROVISION_ADMIN_EMAIL: str | None = None
+    AUTO_PROVISION_ADMIN_PASSWORD: str | None = None
+    AUTO_PROVISION_ADMIN_NAME: str = "Super Admin"
+    AUTO_PROVISION_ADMIN_TENANT_SLUG: str | None = None
+    AUTO_PROVISION_ADMIN_TENANT_NAME: str = "Super Admin Workspace"
+    SUPER_ADMIN_EMAILS: str = "admin@qa.com,admin@dev.local,superadmin@qa.com"
+
     @property
     def redis_enabled(self) -> bool:
         return self.REDIS_ENABLED == "true"

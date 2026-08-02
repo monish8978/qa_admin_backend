@@ -35,6 +35,7 @@ from ..models.master import (
     OutboundWebhook,
     Tenant,
     UsageMetric,
+    EscalationRule,
 )
 from ..models.tenant import Conversation, Evaluation, FormDefinition, WorkflowQueue
 from .department_routing import (
@@ -520,7 +521,7 @@ def eval_process(
                     )
 
                 # No LLM config or disabled — shortcut to QA queue
-                if not llm_config or not llm_config.enabled:
+                if True:  # Force skip AI/LLM evaluation
                     qa_assignee = None
                     if (
                         routed_dept
@@ -627,17 +628,38 @@ def eval_process(
 
                     confidence_routing = _route_by_confidence(raw_answers)
 
+                    # Fetch EscalationRule settings to apply routing thresholds
+                    rule = master.execute(
+                        select(EscalationRule).where(EscalationRule.tenantId == tenantId)
+                    ).scalar_one_or_none()
+
+                    vmin_s = rule.verifierMinRangeStart if rule else 0
+                    vmin_e = rule.verifierMinRangeEnd if rule else 40
+                    vmax_s = rule.verifierMaxRangeStart if rule else 90
+                    vmax_e = rule.verifierMaxRangeEnd if rule else 100
+
+                    ai_score = score_result["overallScore"]
+
+                    def _in_routing_range(score_val: float | None) -> bool:
+                        if not isinstance(score_val, (int, float)):
+                            return False
+                        return (vmin_s <= score_val <= vmin_e) or (vmax_s <= score_val <= vmax_e)
+
+                    should_send_to_reviewer = _in_routing_range(ai_score)
+
                     qa_assignee = None
-                    if (
-                        routed_dept
-                        and routed_dept.get("autoAssignEnabled")
-                        and assignment_mode == "ROUND_ROBIN"
-                    ):
-                        qa_assignee = select_least_loaded_user(
-                            master, ts, tenant_id=tenantId,
-                            department_id=routed_dept["id"], queue_type="QA_QUEUE",
-                        )
-                    qa_start_time = datetime.now(timezone.utc) if qa_assignee else None
+                    qa_start_time = None
+                    if should_send_to_reviewer:
+                        if (
+                            routed_dept
+                            and routed_dept.get("autoAssignEnabled")
+                            and assignment_mode == "ROUND_ROBIN"
+                        ):
+                            qa_assignee = select_least_loaded_user(
+                                master, ts, tenant_id=tenantId,
+                                department_id=routed_dept["id"], queue_type="QA_QUEUE",
+                            )
+                        qa_start_time = datetime.now(timezone.utc) if qa_assignee else None
 
                     ai_metadata = {
                         "provider": llm_result["provider"],
@@ -668,31 +690,50 @@ def eval_process(
                         "prompt": prompt,
                         "responseContent": content,
                         "answersHash": answers_hash,
-                        "aiScore": score_result["overallScore"],
+                        "aiScore": ai_score,
                     })
 
                     ev.departmentId = routed_dept["id"] if routed_dept else None
-                    ev.workflowState = (
-                        WorkflowState.QA_IN_PROGRESS.value
-                        if qa_assignee
-                        else WorkflowState.QA_PENDING.value
-                    )
                     ev.aiResponseData = ai_layer
-                    ev.aiScore = score_result["overallScore"]
+                    ev.aiScore = ai_score
                     ev.aiMetadata = ai_metadata
                     ev.confidenceScore = confidence_routing["confidenceScore"]
                     ev.aiCompletedAt = datetime.now(timezone.utc)
-                    ev.qaUserId = qa_assignee["id"] if qa_assignee else None
-                    ev.qaStartedAt = qa_start_time
 
-                    _upsert_queue_via_pool(
-                        ts, evaluationId,
-                        queue_type="QA_QUEUE",
-                        department_id=routed_dept["id"] if routed_dept else None,
-                        assigned_to=qa_assignee["id"] if qa_assignee else None,
-                        priority=confidence_routing["queuePriority"],
-                    )
-                    conversation.status = "QA_REVIEW"
+                    if should_send_to_reviewer:
+                        ev.workflowState = (
+                            WorkflowState.QA_IN_PROGRESS.value
+                            if qa_assignee
+                            else WorkflowState.QA_PENDING.value
+                        )
+                        ev.qaUserId = qa_assignee["id"] if qa_assignee else None
+                        ev.qaStartedAt = qa_start_time
+
+                        _upsert_queue_via_pool(
+                            ts, evaluationId,
+                            queue_type="QA_QUEUE",
+                            department_id=routed_dept["id"] if routed_dept else None,
+                            assigned_to=qa_assignee["id"] if qa_assignee else None,
+                            priority=confidence_routing["queuePriority"],
+                        )
+                        conversation.status = "QA_REVIEW"
+                    else:
+                        # Auto-completed directly by AI routing rule (outside threshold ranges)
+                        ev.workflowState = WorkflowState.LOCKED.value
+                        ev.verifierFinalData = ai_layer
+                        ev.finalResponseData = ai_layer
+                        ev.finalScore = ai_score
+                        ev.passFail = score_result["passFail"]
+                        ev.lockedAt = datetime.now(timezone.utc)
+                        conversation.status = "COMPLETED"
+
+                        # Delete any existing workflow queues for this evaluation
+                        from sqlalchemy import text as _sa_text
+                        ts.execute(
+                            _sa_text('DELETE FROM workflow_queues WHERE "evaluationId" = :eid'),
+                            {"eid": evaluationId},
+                        )
+
                     conversation.departmentId = routed_dept["id"] if routed_dept else None
                     ts.commit()
 

@@ -207,24 +207,69 @@ def list_conversations(
     skip = (page - 1) * limit
     status = query.get("status")
     agent_id = query.get("agentId")
+    agent_name = query.get("agentName")
+    score_category = query.get("scoreCategory")
     search = (query.get("search") or "").strip()
+    from_date_str = query.get("fromDate")
+    to_date_str = query.get("toDate")
 
     pool = get_tenant_pool()
     with pool.session(tenant_id) as ts:
-        clauses = ["1=1"]
-        params: dict[str, Any] = {"skip": skip, "limit": limit}
-        if status:
-            clauses.append('c."status" = :status')
-            params["status"] = status
+        clauses_no_status = ["1=1"]
+        params_no_status: dict[str, Any] = {}
+        
+        if role in ("ADMIN", "QA", "VERIFIER"):
+            clauses_no_status.append("c.status NOT IN ('EVALUATING', 'FAILED')")
+        
+        if from_date_str:
+            try:
+                from_date = datetime.fromisoformat(from_date_str.replace("Z", "+00:00"))
+                clauses_no_status.append('c."receivedAt" >= :from_date')
+                params_no_status["from_date"] = from_date
+            except ValueError:
+                pass
+        if to_date_str:
+            try:
+                to_date = datetime.fromisoformat(to_date_str.replace("Z", "+00:00"))
+                # Adjust to end of day if it's just a date
+                if "T" not in to_date_str:
+                    to_date = to_date.replace(hour=23, minute=59, second=59)
+                clauses_no_status.append('c."receivedAt" <= :to_date')
+                params_no_status["to_date"] = to_date
+            except ValueError:
+                pass
         if agent_id:
-            clauses.append('c."agentId" = :agent_id')
-            params["agent_id"] = agent_id
+            clauses_no_status.append('c."agentId" = :agent_id')
+            params_no_status["agent_id"] = agent_id
+        if agent_name:
+            clauses_no_status.append('c."agentName" = :agent_name')
+            params_no_status["agent_name"] = agent_name
+            
+        from ..models.master import BlindReviewSettings
+        blind = master.execute(
+            select(BlindReviewSettings).where(BlindReviewSettings.tenantId == tenant_id)
+        ).scalar_one_or_none()
+
+        if score_category:
+            DEFAULT_BUCKETS = [
+                { "id": "best", "name": "Best Performance", "min": 90.0, "max": 100.0, "color": "emerald" },
+                { "id": "good", "name": "Good Performance", "min": 70.0, "max": 89.9, "color": "blue" },
+                { "id": "avg", "name": "Average Performance", "min": 60.0, "max": 69.9, "color": "amber" },
+                { "id": "poor", "name": "Poor Performance", "min": 0.0, "max": 59.9, "color": "red" }
+            ]
+            buckets = blind.scoreBuckets if (blind and blind.scoreBuckets and len(blind.scoreBuckets) > 0) else DEFAULT_BUCKETS
+            target = next((b for b in buckets if b["id"] == score_category), None)
+            if target:
+                b_min = float(target["min"])
+                b_max = float(target["max"])
+                clauses_no_status.append(f'e."finalScore" >= {b_min} AND e."finalScore" <= {b_max}')
+
         if role == "QA" and user_id:
-            clauses.append('e."qaUserId" = :uid')
-            params["uid"] = user_id
+            clauses_no_status.append('e."qaUserId" = :uid')
+            params_no_status["uid"] = user_id
         elif role == "VERIFIER" and user_id:
-            clauses.append('e."verifierUserId" = :uid')
-            params["uid"] = user_id
+            clauses_no_status.append('e."verifierUserId" = :uid')
+            params_no_status["uid"] = user_id
 
         if search:
             search_channel = _parse_search_channel(search)
@@ -235,9 +280,53 @@ def list_conversations(
             ]
             if search_channel:
                 or_clauses.append('c.channel = :search_channel')
-                params["search_channel"] = search_channel
-            clauses.append("(" + " OR ".join(or_clauses) + ")")
-            params["search"] = f"%{search}%"
+                params_no_status["search_channel"] = search_channel
+            
+            from ..models.master import User
+            matching_users = master.execute(
+                select(User.id).where(
+                    (User.tenantId == tenant_id) &
+                    (User.name.ilike(f"%{search}%"))
+                )
+            ).scalars().all()
+            if matching_users:
+                bind_names = []
+                for idx, uid in enumerate(matching_users):
+                    p_name = f"m_uid_{idx}"
+                    bind_names.append(f":{p_name}")
+                    params_no_status[p_name] = uid
+                bind_str = ", ".join(bind_names)
+                or_clauses.append(f'e."qaUserId" IN ({bind_str})')
+                or_clauses.append(f'e."verifierUserId" IN ({bind_str})')
+
+            clauses_no_status.append("(" + " OR ".join(or_clauses) + ")")
+            params_no_status["search"] = f"%{search}%"
+
+        where_sql_no_status = " AND ".join(clauses_no_status)
+
+        # Get status counts ignoring the status filter
+        counts_rows = ts.execute(
+            text(
+                f"""
+                SELECT c.status, COUNT(*) as cnt
+                FROM conversations c
+                LEFT JOIN evaluations e ON e."conversationId" = c.id
+                WHERE {where_sql_no_status}
+                GROUP BY c.status
+                """
+            ),
+            params_no_status,
+        ).all()
+        status_counts = {row[0]: int(row[1]) for row in counts_rows}
+
+        # Apply status filter for main row selection
+        clauses = list(clauses_no_status)
+        params = dict(params_no_status)
+        params["skip"] = skip
+        params["limit"] = limit
+        if status:
+            clauses.append('c."status" = :status')
+            params["status"] = status
 
         where_sql = " AND ".join(clauses)
 
@@ -248,6 +337,7 @@ def list_conversations(
                        c.status, c."receivedAt",
                        e."workflowState", e."aiScore", e."qaScore",
                        e."verifierScore", e."finalScore", e."passFail",
+                       e."qaUserId", e."verifierUserId",
                        fd."scoringStrategy"
                 FROM conversations c
                 LEFT JOIN evaluations e ON e."conversationId" = c.id
@@ -270,13 +360,23 @@ def list_conversations(
             {k: v for k, v in params.items() if k not in ("skip", "limit")},
         ).scalar_one()
 
+    from ..models.master import BlindReviewSettings
+    blind = master.execute(
+        select(BlindReviewSettings).where(BlindReviewSettings.tenantId == tenant_id)
+    ).scalar_one_or_none()
+
     items: list[dict[str, Any]] = []
     for r in rows:
+        agent_name_val = r["agentName"]
+        if blind is not None and getattr(blind, "hideAgentFromQA", False) and role == "QA":
+            source = r["agentName"] or r["id"]
+            agent_name_val = _blind_alias(tenant_id, "agent", str(source))
+
         base = {
             "id": r["id"],
             "externalId": r["externalId"],
             "channel": r["channel"],
-            "agentName": r["agentName"],
+            "agentName": agent_name_val,
             "customerRef": r["customerRef"],
             "status": r["status"],
             "receivedAt": r["receivedAt"].isoformat() if r["receivedAt"] else None,
@@ -289,12 +389,22 @@ def list_conversations(
         ss = r["scoringStrategy"]
         if isinstance(ss, dict) and isinstance(ss.get("passMark"), (int, float)):
             pass_mark = float(ss["passMark"])
+
+        qa_score_val = r["qaScore"]
+        qa_user_val = r["qaUserId"]
+        if blind is not None and getattr(blind, "hideQAFromVerifier", False) and role == "VERIFIER":
+            qa_score_val = None
+            if r["qaUserId"]:
+                qa_user_val = _blind_alias(tenant_id, "qa", str(r["qaUserId"]))
+
         base["evaluation"] = {
             "workflowState": r["workflowState"],
             "aiScore": r["aiScore"],
-            "qaScore": r["qaScore"],
+            "qaScore": qa_score_val,
             "verifierScore": r["verifierScore"],
             "finalScore": r["finalScore"],
+            "qaUserId": qa_user_val,
+            "verifierUserId": r["verifierUserId"],
             "passFail": _derive_pass_fail(r["finalScore"], pass_mark, r["passFail"]),
         }
         items.append(base)
@@ -307,6 +417,7 @@ def list_conversations(
             "total": int(total),
             "totalPages": (int(total) + limit - 1) // limit,
         },
+        "counts": status_counts,
     }
 
 
@@ -446,7 +557,7 @@ def upload_conversations(
         limits = PLAN_LIMITS[PlanType(tenant.plan)]
     except (KeyError, ValueError):
         limits = PLAN_LIMITS[PlanType.BASIC]
-    monthly_cap = limits["conversationsPerMonth"]
+    monthly_cap = tenant.customConversationsLimit if tenant.customConversationsLimit is not None else limits["conversationsPerMonth"]
     if monthly_cap != 999_999:
         used = usage_meter_service.get_monthly_conversation_count(master, tenant_id)
         remaining = monthly_cap - used

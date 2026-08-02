@@ -116,7 +116,8 @@ class UsersService:
         if tenant is None:
             raise not_found("TENANT_NOT_FOUND", "Tenant not found")
         limits = PLAN_LIMITS.get(PlanType(tenant.plan))
-        if limits and limits["users"] != 999_999:
+        users_limit = tenant.customUsersLimit if tenant.customUsersLimit is not None else (limits["users"] if limits else 999_999)
+        if users_limit != 999_999:
             current = (
                 self.db.scalar(
                     select(func.count())
@@ -125,10 +126,10 @@ class UsersService:
                 )
                 or 0
             )
-            if current >= limits["users"]:
+            if current >= users_limit:
                 raise bad_request(
                     "PLAN_LIMIT_EXCEEDED",
-                    f"User limit of {limits['users']} reached on {tenant.plan} plan. "
+                    f"User limit of {users_limit} reached on {tenant.plan} plan. "
                     "Upgrade to create more users.",
                 )
 
@@ -145,6 +146,32 @@ class UsersService:
         self.db.add(user)
         self.db.commit()
         self.db.refresh(user)
+
+        # Send welcome email notification with credentials
+        import logging
+        from . import notify_service
+        from ..config import get_settings
+
+        log = logging.getLogger("qa.users")
+        settings = get_settings()
+        dashboard_url = f"{settings.WEB_URL}/login"
+
+        try:
+            notify_service.send_notification(
+                self.db,
+                template="user_created",
+                to=user.email,
+                context={
+                    "name": user.name,
+                    "email": user.email,
+                    "password": plain_password,
+                    "dashboardUrl": dashboard_url,
+                },
+                tenant_id=tenant_id,
+            )
+        except Exception as e:
+            log.error("Failed to send welcome email to user: %s", e, exc_info=True)
+
         return {"user": _serialize(user), "password": plain_password}
 
     def update_user(self, tenant_id: str, user_id: str, dto: UpdateUserRequest) -> dict:
@@ -154,8 +181,8 @@ class UsersService:
         if not user:
             raise not_found("USER_NOT_FOUND", "User not found")
 
-        if dto.departmentId is not None:
-            if dto.departmentId == "":
+        if "departmentId" in dto.model_fields_set:
+            if dto.departmentId is None or dto.departmentId == "":
                 user.departmentId = None
             else:
                 dept = self.db.scalar(
@@ -171,7 +198,10 @@ class UsersService:
                     )
                 user.departmentId = dto.departmentId
 
-        if dto.role and dto.role != UserRole.ADMIN and user.role == UserRole.ADMIN.value:
+        if (
+            (dto.role and dto.role != UserRole.ADMIN and user.role == UserRole.ADMIN.value)
+            or (dto.status and dto.status != UserStatus.ACTIVE and user.role == UserRole.ADMIN.value)
+        ):
             admin_count = (
                 self.db.scalar(
                     select(func.count())
@@ -186,7 +216,7 @@ class UsersService:
             )
             if admin_count <= 1:
                 raise forbidden(
-                    "CANNOT_DEMOTE_LAST_ADMIN", "Cannot change role of the only active admin"
+                    "CANNOT_DEMOTE_LAST_ADMIN", "Cannot change role or deactivate the only active admin"
                 )
 
         if dto.name:
@@ -246,7 +276,8 @@ class UsersService:
         if tenant is None:
             raise not_found("TENANT_NOT_FOUND", "Tenant not found")
         limits = PLAN_LIMITS.get(PlanType(tenant.plan))
-        if limits and limits["users"] != 999_999:
+        users_limit = tenant.customUsersLimit if tenant.customUsersLimit is not None else (limits["users"] if limits else 999_999)
+        if users_limit != 999_999:
             current = (
                 self.db.scalar(
                     select(func.count())
@@ -255,10 +286,10 @@ class UsersService:
                 )
                 or 0
             )
-            if current >= limits["users"]:
+            if current >= users_limit:
                 raise bad_request(
                     "PLAN_LIMIT_EXCEEDED",
-                    f"User limit of {limits['users']} reached on {tenant.plan} plan.",
+                    f"User limit of {users_limit} reached on {tenant.plan} plan.",
                 )
 
         user = User(

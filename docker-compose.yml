@@ -18,7 +18,7 @@ services:
       - /var/log/czentrix:/var/log/czentrix
     depends_on:
       - redis
-    command: bash -c "pip install . && uvicorn app.main:app --host 0.0.0.0 --port 8005"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8005
 
   # The Celery background worker
   worker:
@@ -36,7 +36,24 @@ services:
     depends_on:
       - api
       - redis
-    command: bash -c "pip install . && celery -A app.worker.celery_app worker -l info"
+    command: celery -A app.worker.celery_app worker -l info
+
+  # Celery Beat Scheduler for periodic tasks (e.g. stale escalation scans)
+  beat:
+    build: .
+    container_name: qa_admin_beat
+    env_file:
+      - .env
+    environment:
+      - REDIS_HOST=redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /var/log/czentrix:/var/log/czentrix
+    depends_on:
+      - api
+      - redis
+    command: celery -A app.worker.celery_app beat -l info
 
   # Redis for Celery and caching
   redis:
@@ -52,9 +69,6 @@ services:
       - POSTGRES_PASSWORD=sqladmin
       - POSTGRES_DB=qa_master
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - ./postgres_data:/var/lib/postgresql/data
     ports:
       - "5433:5432"
-
-volumes:
-  pgdata:

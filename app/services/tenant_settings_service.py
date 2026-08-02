@@ -61,15 +61,25 @@ def patch_escalation(db: Session, tenant_id: str, patch: dict[str, Any]) -> Esca
     return row
 
 
-# ─── blind review ─────────────────────────────────────────────────────────────
+DEFAULT_BUCKETS = [
+    { "id": "best", "name": "Best Performance", "min": 90.0, "max": 100.0, "color": "emerald" },
+    { "id": "good", "name": "Good Performance", "min": 70.0, "max": 89.9, "color": "blue" },
+    { "id": "avg", "name": "Average Performance", "min": 60.0, "max": 69.9, "color": "amber" },
+    { "id": "poor", "name": "Poor Performance", "min": 0.0, "max": 59.9, "color": "red" }
+]
+
 
 def get_blind_review(db: Session, tenant_id: str) -> BlindReviewSettings:
     row = db.execute(
         select(BlindReviewSettings).where(BlindReviewSettings.tenantId == tenant_id)
     ).scalar_one_or_none()
     if row is None:
-        row = BlindReviewSettings(tenantId=tenant_id)
+        row = BlindReviewSettings(tenantId=tenant_id, scoreBuckets=DEFAULT_BUCKETS)
         db.add(row)
+        db.commit()
+        db.refresh(row)
+    elif not row.scoreBuckets or len(row.scoreBuckets) == 0:
+        row.scoreBuckets = DEFAULT_BUCKETS
         db.commit()
         db.refresh(row)
     return row
@@ -83,6 +93,19 @@ def patch_blind_review(
         row.hideAgentFromQA = bool(patch["hideAgentFromQA"])
     if "hideQAFromVerifier" in patch:
         row.hideQAFromVerifier = bool(patch["hideQAFromVerifier"])
+    if "bestThreshold" in patch and patch["bestThreshold"] is not None:
+        row.bestThreshold = float(patch["bestThreshold"])
+    if "goodThreshold" in patch and patch["goodThreshold"] is not None:
+        row.goodThreshold = float(patch["goodThreshold"])
+    if "avgThreshold" in patch and patch["avgThreshold"] is not None:
+        row.avgThreshold = float(patch["avgThreshold"])
+    if "poorThreshold" in patch and patch["poorThreshold"] is not None:
+        row.poorThreshold = float(patch["poorThreshold"])
+    if "scoreBuckets" in patch and patch["scoreBuckets"] is not None:
+        row.scoreBuckets = [
+            b.model_dump() if hasattr(b, "model_dump") else b
+            for b in patch["scoreBuckets"]
+        ]
     db.commit()
     db.refresh(row)
     return row

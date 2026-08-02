@@ -107,7 +107,7 @@ def ingest_conversations(
         limits = PLAN_LIMITS[PlanType(tenant.plan)]
     except (ValueError, KeyError):
         limits = PLAN_LIMITS[PlanType.BASIC]
-    monthly_cap = limits["conversationsPerMonth"]
+    monthly_cap = tenant.customConversationsLimit if tenant.customConversationsLimit is not None else limits["conversationsPerMonth"]
     if monthly_cap != 999_999:
         used = get_monthly_conversation_count(master, tenant_id)
         remaining = monthly_cap - used

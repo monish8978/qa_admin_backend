@@ -38,3 +38,7 @@ def not_found(code: str, message: str, details: Any | None = None) -> CodedHTTPE
 
 def bad_request(code: str, message: str, details: Any | None = None) -> CodedHTTPException:
     return CodedHTTPException(status.HTTP_400_BAD_REQUEST, code, message, details)
+
+
+def too_many_requests(code: str, message: str, details: Any | None = None) -> CodedHTTPException:
+    return CodedHTTPException(429, code, message, details)
