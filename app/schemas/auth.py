@@ -16,7 +16,7 @@ class SignupRequest(BaseModel):
     tenantSlug: str = Field(min_length=3, max_length=30)
     adminEmail: EmailStr
     adminName: str = Field(min_length=2, max_length=50)
-    password: str = Field(min_length=12, max_length=100)
+    password: str = Field(min_length=8, max_length=12)
     plan: PlanType
 
     @field_validator("tenantSlug")
@@ -28,7 +28,7 @@ class SignupRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    # Use plain str rather than EmailStr â€“ pydantic's EmailStr rejects reserved
+    # Use plain str rather than EmailStr – pydantic's EmailStr rejects reserved
     # TLDs like .local (RFC 6762), which the existing user table can contain
     # (e.g. seeded admin@dev.local). Authentication still fails safely on
     # unknown addresses via the DB lookup.
@@ -36,6 +36,7 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1)
     tenantSlug: str | None = Field(default=None)
     skip2fa: bool = Field(default=False)
+    confirmLogout: bool = Field(default=False)
 
 
 class RefreshTokenRequest(BaseModel):
@@ -62,7 +63,7 @@ class VerifyMfaRequest(BaseModel):
 
 class AcceptInviteRequest(BaseModel):
     token: str
-    password: str = Field(min_length=12)
+    password: str = Field(min_length=8, max_length=12)
 
 
 class TenantSummary(BaseModel):

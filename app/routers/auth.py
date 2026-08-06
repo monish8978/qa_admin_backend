@@ -120,7 +120,6 @@ def logout(
     dto: RefreshTokenRequest,
     db: Annotated[Session, Depends(get_db)],
     request_id: Annotated[str, Depends(get_request_id)],
-    _payload: Annotated[dict, Depends(get_current_payload)],
 ):
     log.info("[%s] User logging out", request_id)
     AuthService(db).logout(dto.refreshToken)

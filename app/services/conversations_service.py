@@ -221,14 +221,14 @@ def list_conversations(
         if role in ("ADMIN", "QA", "VERIFIER"):
             clauses_no_status.append("c.status NOT IN ('EVALUATING', 'FAILED')")
         
-        if from_date_str:
+        if from_date_str and not search:
             try:
                 from_date = datetime.fromisoformat(from_date_str.replace("Z", "+00:00"))
                 clauses_no_status.append('c."receivedAt" >= :from_date')
                 params_no_status["from_date"] = from_date
             except ValueError:
                 pass
-        if to_date_str:
+        if to_date_str and not search:
             try:
                 to_date = datetime.fromisoformat(to_date_str.replace("Z", "+00:00"))
                 # Adjust to end of day if it's just a date
@@ -308,16 +308,24 @@ def list_conversations(
         counts_rows = ts.execute(
             text(
                 f"""
-                SELECT c.status, COUNT(*) as cnt
+                SELECT c.status, e."isEscalated", COUNT(*) as cnt
                 FROM conversations c
                 LEFT JOIN evaluations e ON e."conversationId" = c.id
                 WHERE {where_sql_no_status}
-                GROUP BY c.status
+                GROUP BY c.status, e."isEscalated"
                 """
             ),
             params_no_status,
         ).all()
-        status_counts = {row[0]: int(row[1]) for row in counts_rows}
+        status_counts = {"PENDING": 0, "EVALUATING": 0, "QA_REVIEW": 0, "VERIFIER_REVIEW": 0, "AUDIT": 0, "COMPLETED": 0, "FAILED": 0, "ESCALATED": 0}
+        for row in counts_rows:
+            st = row[0]
+            is_esc = row[1]
+            cnt = int(row[2])
+            if is_esc:
+                status_counts["ESCALATED"] = status_counts.get("ESCALATED", 0) + cnt
+            elif st:
+                status_counts[st] = status_counts.get(st, 0) + cnt
 
         # Apply status filter for main row selection
         clauses = list(clauses_no_status)
@@ -325,8 +333,11 @@ def list_conversations(
         params["skip"] = skip
         params["limit"] = limit
         if status:
-            clauses.append('c."status" = :status')
-            params["status"] = status
+            if status == "ESCALATED":
+                clauses.append('e."isEscalated" = true')
+            else:
+                clauses.append('c."status" = :status AND (e."isEscalated" = false OR e."isEscalated" IS NULL)')
+                params["status"] = status
 
         where_sql = " AND ".join(clauses)
 
@@ -338,7 +349,8 @@ def list_conversations(
                        e."workflowState", e."aiScore", e."qaScore",
                        e."verifierScore", e."finalScore", e."passFail",
                        e."qaUserId", e."verifierUserId",
-                       fd."scoringStrategy"
+                       e."qaStartedAt", e."qaCompletedAt", e."verifierStartedAt", e."verifierCompletedAt",
+                       fd."scoringStrategy", e."isEscalated"
                 FROM conversations c
                 LEFT JOIN evaluations e ON e."conversationId" = c.id
                 LEFT JOIN form_definitions fd ON fd.id = e."formDefinitionId"
@@ -372,13 +384,14 @@ def list_conversations(
             source = r["agentName"] or r["id"]
             agent_name_val = _blind_alias(tenant_id, "agent", str(source))
 
+        is_esc = r["isEscalated"] or False
         base = {
             "id": r["id"],
             "externalId": r["externalId"],
             "channel": r["channel"],
             "agentName": agent_name_val,
             "customerRef": r["customerRef"],
-            "status": r["status"],
+            "status": "ESCALATED" if is_esc else r["status"],
             "receivedAt": r["receivedAt"].isoformat() if r["receivedAt"] else None,
         }
         if r["workflowState"] is None:
@@ -406,6 +419,10 @@ def list_conversations(
             "qaUserId": qa_user_val,
             "verifierUserId": r["verifierUserId"],
             "passFail": _derive_pass_fail(r["finalScore"], pass_mark, r["passFail"]),
+            "qaStartedAt": r["qaStartedAt"].isoformat() if r["qaStartedAt"] else None,
+            "qaCompletedAt": r["qaCompletedAt"].isoformat() if r["qaCompletedAt"] else None,
+            "verifierStartedAt": r["verifierStartedAt"].isoformat() if r["verifierStartedAt"] else None,
+            "verifierCompletedAt": r["verifierCompletedAt"].isoformat() if r["verifierCompletedAt"] else None,
         }
         items.append(base)
 

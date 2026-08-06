@@ -72,3 +72,20 @@ class RoutingPreviewRequest(BaseModel):
     channel: Channel
     applicationKey: str | None = None
     metadata: dict[str, Any] | None = None
+
+
+class DirectUploadConversationsRequest(BaseModel):
+    email: str
+    password: str
+    tenantSlug: str
+    channel: str
+    conversations: list[UploadConversationItem] = Field(min_length=1, max_length=500)
+
+    @field_validator("channel")
+    @classmethod
+    def normalize_channel(cls, value: str) -> str:
+        normalized = (value or "").strip().upper()
+        if normalized not in {"CHAT", "EMAIL", "CALL", "SOCIAL"}:
+            raise ValueError("Input should be 'CHAT', 'EMAIL', 'CALL' or 'SOCIAL'")
+        return normalized
+

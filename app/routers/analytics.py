@@ -59,7 +59,7 @@ def agent_performance(
     tenant_id = payload["tenantId"]
     log.info("[%s] Fetching agent performance for tenant: %s (from=%s, to=%s)", rid, tenant_id, from_, to)
     f, t = _range(from_, to)
-    res = svc.agent_performance(tenant_id, f, t)
+    res = svc.agent_performance(tenant_id, f, t, role=payload["role"], user_id=payload["sub"])
     log.info("[%s] Successfully retrieved agent performance for tenant: %s", rid, tenant_id)
     return build_response(res, rid)
 
@@ -74,7 +74,7 @@ def deviation_trends(
     tenant_id = payload["tenantId"]
     log.info("[%s] Fetching deviation trends for tenant: %s (from=%s, to=%s)", rid, tenant_id, from_, to)
     f, t = _range(from_, to)
-    res = svc.deviation_trends(tenant_id, f, t)
+    res = svc.deviation_trends(tenant_id, f, t, role=payload["role"], user_id=payload["sub"])
     log.info("[%s] Successfully retrieved deviation trends for tenant: %s", rid, tenant_id)
     return build_response(res, rid)
 
@@ -89,7 +89,7 @@ def question_deviations(
     tenant_id = payload["tenantId"]
     log.info("[%s] Fetching question deviations for tenant: %s (from=%s, to=%s)", rid, tenant_id, from_, to)
     f, t = _range(from_, to)
-    res = svc.question_deviations(tenant_id, f, t)
+    res = svc.question_deviations(tenant_id, f, t, role=payload["role"], user_id=payload["sub"])
     log.info("[%s] Successfully retrieved question deviations for tenant: %s", rid, tenant_id)
     return build_response(res, rid)
 
@@ -120,7 +120,7 @@ def verifier_overrides(
     tenant_id = payload["tenantId"]
     log.info("[%s] Fetching verifier overrides for tenant: %s (from=%s, to=%s)", rid, tenant_id, from_, to)
     f, t = _range(from_, to)
-    res = svc.verifier_overrides(tenant_id, f, t)
+    res = svc.verifier_overrides(tenant_id, f, t, role=payload["role"], user_id=payload["sub"])
     log.info("[%s] Successfully retrieved verifier overrides for tenant: %s", rid, tenant_id)
     return build_response(res, rid)
 
@@ -135,7 +135,7 @@ def rejection_reasons(
     tenant_id = payload["tenantId"]
     log.info("[%s] Fetching rejection reasons for tenant: %s (from=%s, to=%s)", rid, tenant_id, from_, to)
     f, t = _range(from_, to)
-    res = svc.rejection_reasons(tenant_id, f, t)
+    res = svc.rejection_reasons(tenant_id, f, t, role=payload["role"], user_id=payload["sub"])
     log.info("[%s] Successfully retrieved rejection reasons for tenant: %s", rid, tenant_id)
     return build_response(res, rid)
 
@@ -150,7 +150,7 @@ def score_trends(
     tenant_id = payload["tenantId"]
     log.info("[%s] Fetching score trends for tenant: %s (from=%s, to=%s)", rid, tenant_id, from_, to)
     f, t = _range(from_, to)
-    res = svc.score_trends(tenant_id, f, t)
+    res = svc.score_trends(tenant_id, f, t, role=payload["role"], user_id=payload["sub"])
     log.info("[%s] Successfully retrieved score trends for tenant: %s", rid, tenant_id)
     return build_response(res, rid)
 
@@ -181,7 +181,7 @@ def qa_reviewer_performance(
     tenant_id = payload["tenantId"]
     log.info("[%s] Fetching QA reviewer performance for tenant: %s (from=%s, to=%s)", rid, tenant_id, from_, to)
     f, t = _range(from_, to)
-    res = svc.qa_reviewer_performance(tenant_id, f, t)
+    res = svc.qa_reviewer_performance(tenant_id, f, t, role=payload["role"], user_id=payload["sub"])
     log.info("[%s] Successfully retrieved QA reviewer performance for tenant: %s", rid, tenant_id)
     return build_response(res, rid)
 
@@ -196,7 +196,7 @@ def verifier_report(
     tenant_id = payload["tenantId"]
     log.info("[%s] Fetching verifier report for tenant: %s (from=%s, to=%s)", rid, tenant_id, from_, to)
     f, t = _range(from_, to)
-    res = svc.verifier_report(tenant_id, f, t)
+    res = svc.verifier_report(tenant_id, f, t, role=payload["role"], user_id=payload["sub"])
     log.info("[%s] Successfully retrieved verifier report for tenant: %s", rid, tenant_id)
     return build_response(res, rid)
 
@@ -211,7 +211,7 @@ def conversation_volume(
     tenant_id = payload["tenantId"]
     log.info("[%s] Fetching conversation volume for tenant: %s (from=%s, to=%s)", rid, tenant_id, from_, to)
     f, t = _range(from_, to)
-    res = svc.conversation_volume(tenant_id, f, t)
+    res = svc.conversation_volume(tenant_id, f, t, role=payload["role"], user_id=payload["sub"])
     log.info("[%s] Successfully retrieved conversation volume for tenant: %s", rid, tenant_id)
     return build_response(res, rid)
 
@@ -226,7 +226,7 @@ def sla_report(
     tenant_id = payload["tenantId"]
     log.info("[%s] Fetching SLA report for tenant: %s (from=%s, to=%s)", rid, tenant_id, from_, to)
     f, t = _range(from_, to)
-    res = svc.sla_report(tenant_id, f, t)
+    res = svc.sla_report(tenant_id, f, t, role=payload["role"], user_id=payload["sub"])
     log.info("[%s] Successfully retrieved SLA report for tenant: %s", rid, tenant_id)
     return build_response(res, rid)
 
@@ -241,6 +241,6 @@ def form_score_distribution(
     tenant_id = payload["tenantId"]
     log.info("[%s] Fetching form score distribution for tenant: %s (from=%s, to=%s)", rid, tenant_id, from_, to)
     f, t = _range(from_, to)
-    res = svc.form_score_distribution(tenant_id, f, t)
+    res = svc.form_score_distribution(tenant_id, f, t, role=payload["role"], user_id=payload["sub"])
     log.info("[%s] Successfully retrieved form score distribution for tenant: %s", rid, tenant_id)
     return build_response(res, rid)

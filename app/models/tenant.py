@@ -42,7 +42,7 @@ def _pg_enum(name: str, *values: str) -> SAEnum:
 
 _CHANNEL = _pg_enum("Channel", "CHAT", "EMAIL", "CALL", "SOCIAL")
 _CONV_STATUS = _pg_enum(
-    "ConvStatus", "PENDING", "EVALUATING", "QA_REVIEW", "VERIFIER_REVIEW", "COMPLETED", "FAILED"
+    "ConvStatus", "PENDING", "EVALUATING", "QA_REVIEW", "VERIFIER_REVIEW", "COMPLETED", "FAILED", "AUDIT"
 )
 _FORM_STATUS = _pg_enum("FormStatus", "DRAFT", "PUBLISHED", "DEPRECATED", "ARCHIVED")
 _WORKFLOW_STATE = _pg_enum(

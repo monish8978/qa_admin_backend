@@ -314,6 +314,54 @@ def _build_app() -> FastAPI:
             finally:
                 session.close()
 
+            # Run ALTER TYPE for AUDIT status on all tenant databases
+            try:
+                from .models.master import Tenant
+                from sqlalchemy import text, select
+                with SessionLocal() as session:
+                    tenants = session.execute(select(Tenant.id)).scalars().all()
+                    
+                pool = get_tenant_pool()
+                for tenant_id in tenants:
+                    try:
+                        engine = pool.get_engine(tenant_id)
+                        with engine.connect() as conn:
+                            try:
+                                conn.execution_options(isolation_level="AUTOCOMMIT").execute(
+                                    text('ALTER TYPE "ConvStatus" ADD VALUE \'AUDIT\';')
+                                )
+                            except Exception:
+                                pass
+                        
+                        with engine.begin() as conn:
+                            # Update conversations with open audit cases to 'AUDIT' status
+                            conn.execute(
+                                text(
+                                    'UPDATE conversations SET status = \'AUDIT\', "updatedAt" = now() '
+                                    'WHERE id IN ('
+                                    '  SELECT e."conversationId" FROM evaluations e '
+                                    '  JOIN audit_cases ac ON ac."evaluationId" = e.id '
+                                    '  WHERE ac.status = \'OPEN\''
+                                    ')'
+                                )
+                            )
+                            # Update conversations with closed (RESOLVED/DISMISSED) audit cases to 'COMPLETED' status
+                            conn.execute(
+                                text(
+                                    'UPDATE conversations SET status = \'COMPLETED\', "updatedAt" = now() '
+                                    'WHERE id IN ('
+                                    '  SELECT e."conversationId" FROM evaluations e '
+                                    '  JOIN audit_cases ac ON ac."evaluationId" = e.id '
+                                    '  WHERE ac.status IN (\'RESOLVED\', \'DISMISSED\')'
+                                    ')'
+                                )
+                            )
+                            log.info("Successfully added 'AUDIT' to ConvStatus enum and updated audit case conversations for tenant %s", tenant_id)
+                    except Exception as te:
+                        log.debug("Failed or skipped ALTER TYPE ConvStatus for tenant %s: %s", tenant_id, te)
+            except Exception as e:
+                log.warning("Failed to run ConvStatus enum migration: %s", e)
+
         import asyncio
         async def _reap_loop():
             while True:

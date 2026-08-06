@@ -16,9 +16,11 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - /var/log/czentrix:/var/log/czentrix
+      - ./app:/app/app
+      - ./alembic:/app/alembic
     depends_on:
       - redis
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8005
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8005 --reload
 
   # The Celery background worker
   worker:
@@ -33,6 +35,7 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - /var/log/czentrix:/var/log/czentrix
+      - ./app:/app/app
     depends_on:
       - api
       - redis
@@ -50,6 +53,7 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - /var/log/czentrix:/var/log/czentrix
+      - ./app:/app/app
     depends_on:
       - api
       - redis
@@ -72,3 +76,4 @@ services:
       - ./postgres_data:/var/lib/postgresql/data
     ports:
       - "5433:5432"
+

@@ -112,14 +112,18 @@ def overview(tenant_id: str, from_: datetime, to: datetime, role: str | None = N
                 params,
             ).scalar_one()
             pending_qa = ts.execute(
-                text(f'SELECT COUNT(*) FROM workflow_queues WHERE "queueType" = \'QA_QUEUE\'{queue_filter}'),
-                params if (role and user_id) else None,
+                text(
+                    f'SELECT COUNT(*) FROM workflow_queues '
+                    f'WHERE "queueType" = \'QA_QUEUE\' AND "createdAt" >= :a AND "createdAt" <= :b{queue_filter}'
+                ),
+                params,
             ).scalar_one()
             pending_ver = ts.execute(
                 text(
-                    f'SELECT COUNT(*) FROM workflow_queues WHERE "queueType" = \'VERIFIER_QUEUE\'{queue_filter}'
+                    f'SELECT COUNT(*) FROM workflow_queues '
+                    f'WHERE "queueType" = \'VERIFIER_QUEUE\' AND "createdAt" >= :a AND "createdAt" <= :b{queue_filter}'
                 ),
-                params if (role and user_id) else None,
+                params,
             ).scalar_one()
             score_row = ts.execute(
                 text(
@@ -174,7 +178,7 @@ def overview(tenant_id: str, from_: datetime, to: datetime, role: str | None = N
 
 
 
-def agent_performance(tenant_id: str, from_: datetime, to: datetime) -> list[dict[str, Any]]:
+def agent_performance(tenant_id: str, from_: datetime, to: datetime, role: str | None = None, user_id: str | None = None) -> list[dict[str, Any]]:
     def _produce():
         DEFAULT_BUCKETS = [
             { "id": "best", "name": "Best Performance", "min": 90.0, "max": 100.0, "color": "emerald" },
@@ -189,7 +193,7 @@ def agent_performance(tenant_id: str, from_: datetime, to: datetime) -> list[dic
                 select(BlindReviewSettings).where(BlindReviewSettings.tenantId == tenant_id)
             ).scalar_one_or_none()
             buckets = blind.scoreBuckets if (blind and blind.scoreBuckets and len(blind.scoreBuckets) > 0) else DEFAULT_BUCKETS
-
+ 
         select_clauses = []
         for b in buckets:
             b_id = b["id"]
@@ -197,6 +201,15 @@ def agent_performance(tenant_id: str, from_: datetime, to: datetime) -> list[dic
             b_max = float(b["max"])
             select_clauses.append(f'SUM(CASE WHEN e."finalScore" >= {b_min} AND e."finalScore" <= {b_max} THEN 1 ELSE 0 END) AS "{b_id}_count"')
         select_sql = ",\n                           ".join(select_clauses)
+ 
+        eval_filter = ""
+        params = {"a": from_, "b": to}
+        if role == "QA" and user_id:
+            eval_filter = ' AND e."qaUserId" = :uid'
+            params["uid"] = user_id
+        elif role == "VERIFIER" and user_id:
+            eval_filter = ' AND e."verifierUserId" = :uid'
+            params["uid"] = user_id
 
         pool = get_tenant_pool()
         with pool.session(tenant_id) as ts:
@@ -212,13 +225,13 @@ def agent_performance(tenant_id: str, from_: datetime, to: datetime) -> list[dic
                     FROM conversations c
                     JOIN evaluations e ON e."conversationId" = c.id
                     WHERE e."workflowState" = 'LOCKED'
-                      AND e."lockedAt" >= :a AND e."lockedAt" <= :b
+                      AND e."lockedAt" >= :a AND e."lockedAt" <= :b{eval_filter}
                     GROUP BY c."agentId", c."agentName"
                     ORDER BY avg_score DESC NULLS LAST
                     LIMIT 50
                     """
                 ),
-                {"a": from_, "b": to},
+                params,
             ).mappings().all()
         return [
             {
@@ -235,23 +248,28 @@ def agent_performance(tenant_id: str, from_: datetime, to: datetime) -> list[dic
             }
             for r in rows
         ]
+ 
+    return _cached(tenant_id, "agent_performance", from_, to, _produce, role, user_id)
 
-    return _cached(tenant_id, "agent_performance", from_, to, _produce)
 
-
-def deviation_trends(tenant_id: str, from_: datetime, to: datetime) -> list[dict[str, Any]]:
+def deviation_trends(tenant_id: str, from_: datetime, to: datetime, role: str | None = None, user_id: str | None = None) -> list[dict[str, Any]]:
     def _produce():
         pool = get_tenant_pool()
         with pool.session(tenant_id) as ts:
+            stmt = select(DeviationRecord).where(
+                (DeviationRecord.createdAt >= from_)
+                & (DeviationRecord.createdAt <= to)
+            )
+            if role == "QA" and user_id:
+                stmt = stmt.where(DeviationRecord.evaluationId.in_(
+                    select(Evaluation.id).where(Evaluation.qaUserId == user_id)
+                ))
+            elif role == "VERIFIER" and user_id:
+                stmt = stmt.where(DeviationRecord.evaluationId.in_(
+                    select(Evaluation.id).where(Evaluation.verifierUserId == user_id)
+                ))
             rows = list(
-                ts.execute(
-                    select(DeviationRecord)
-                    .where(
-                        (DeviationRecord.createdAt >= from_)
-                        & (DeviationRecord.createdAt <= to)
-                    )
-                    .order_by(DeviationRecord.createdAt.asc())
-                ).scalars()
+                ts.execute(stmt.order_by(DeviationRecord.createdAt.asc())).scalars()
             )
         by_day: dict[str, dict[str, Any]] = {}
         for r in rows:
@@ -273,38 +291,45 @@ def deviation_trends(tenant_id: str, from_: datetime, to: datetime) -> list[dict
             for d in by_day.values()
         ]
 
-    return _cached(tenant_id, "deviation_trends", from_, to, _produce)
+    return _cached(tenant_id, "deviation_trends", from_, to, _produce, role, user_id)
 
 
-def question_deviations(tenant_id: str, from_: datetime, to: datetime) -> list[dict[str, Any]]:
+def question_deviations(tenant_id: str, from_: datetime, to: datetime, role: str | None = None, user_id: str | None = None) -> list[dict[str, Any]]:
     def _produce():
         pool = get_tenant_pool()
         with pool.session(tenant_id) as ts:
-            records = list(
-                ts.execute(
-                    select(DeviationRecord).where(
-                        (DeviationRecord.type == "AI_VS_QA")
-                        & (DeviationRecord.questionKey.is_not(None))
-                        & (DeviationRecord.createdAt >= from_)
-                        & (DeviationRecord.createdAt <= to)
-                    )
-                ).scalars()
+            stmt_dev = select(DeviationRecord).where(
+                (DeviationRecord.type == "AI_VS_QA")
+                & (DeviationRecord.questionKey.is_not(None))
+                & (DeviationRecord.createdAt >= from_)
+                & (DeviationRecord.createdAt <= to)
             )
-            total = ts.execute(
-                select(func.count()).select_from(Evaluation).where(
-                    Evaluation.workflowState.in_(
-                        [
-                            "QA_COMPLETED",
-                            "VERIFIER_PENDING",
-                            "VERIFIER_IN_PROGRESS",
-                            "LOCKED",
-                            "ESCALATED",
-                        ]
-                    ),
-                    Evaluation.qaCompletedAt >= from_,
-                    Evaluation.qaCompletedAt <= to,
-                )
-            ).scalar_one()
+            stmt_tot = select(func.count()).select_from(Evaluation).where(
+                Evaluation.workflowState.in_(
+                    [
+                        "QA_COMPLETED",
+                        "VERIFIER_PENDING",
+                        "VERIFIER_IN_PROGRESS",
+                        "LOCKED",
+                        "ESCALATED",
+                    ]
+                ),
+                Evaluation.qaCompletedAt >= from_,
+                Evaluation.qaCompletedAt <= to,
+            )
+            if role == "QA" and user_id:
+                stmt_dev = stmt_dev.where(DeviationRecord.evaluationId.in_(
+                    select(Evaluation.id).where(Evaluation.qaUserId == user_id)
+                ))
+                stmt_tot = stmt_tot.where(Evaluation.qaUserId == user_id)
+            elif role == "VERIFIER" and user_id:
+                stmt_dev = stmt_dev.where(DeviationRecord.evaluationId.in_(
+                    select(Evaluation.id).where(Evaluation.verifierUserId == user_id)
+                ))
+                stmt_tot = stmt_tot.where(Evaluation.verifierUserId == user_id)
+
+            records = list(ts.execute(stmt_dev).scalars())
+            total = ts.execute(stmt_tot).scalar_one()
 
         counts: dict[str, dict[str, Any]] = {}
         for r in records:
@@ -323,7 +348,7 @@ def question_deviations(tenant_id: str, from_: datetime, to: datetime) -> list[d
             for r in ranked
         ]
 
-    return _cached(tenant_id, "question_deviations", from_, to, _produce)
+    return _cached(tenant_id, "question_deviations", from_, to, _produce, role, user_id)
 
 
 def escalation_stats(tenant_id: str, from_: datetime, to: datetime, role: str | None = None, user_id: str | None = None) -> dict[str, int]:
@@ -353,27 +378,34 @@ def escalation_stats(tenant_id: str, from_: datetime, to: datetime, role: str | 
 
 
 
-def verifier_overrides(tenant_id: str, from_: datetime, to: datetime) -> list[dict[str, Any]]:
+def verifier_overrides(tenant_id: str, from_: datetime, to: datetime, role: str | None = None, user_id: str | None = None) -> list[dict[str, Any]]:
     def _produce():
         pool = get_tenant_pool()
         with pool.session(tenant_id) as ts:
-            records = list(
-                ts.execute(
-                    select(DeviationRecord).where(
-                        (DeviationRecord.type == "QA_VS_VERIFIER")
-                        & (DeviationRecord.questionKey.is_not(None))
-                        & (DeviationRecord.createdAt >= from_)
-                        & (DeviationRecord.createdAt <= to)
-                    )
-                ).scalars()
+            stmt_rec = select(DeviationRecord).where(
+                (DeviationRecord.type == "QA_VS_VERIFIER")
+                & (DeviationRecord.questionKey.is_not(None))
+                & (DeviationRecord.createdAt >= from_)
+                & (DeviationRecord.createdAt <= to)
             )
-            total = ts.execute(
-                select(func.count()).select_from(Evaluation).where(
-                    Evaluation.workflowState == "LOCKED",
-                    Evaluation.verifierCompletedAt >= from_,
-                    Evaluation.verifierCompletedAt <= to,
-                )
-            ).scalar_one()
+            stmt_tot = select(func.count()).select_from(Evaluation).where(
+                Evaluation.workflowState == "LOCKED",
+                Evaluation.verifierCompletedAt >= from_,
+                Evaluation.verifierCompletedAt <= to,
+            )
+            if role == "QA" and user_id:
+                stmt_rec = stmt_rec.where(DeviationRecord.evaluationId.in_(
+                    select(Evaluation.id).where(Evaluation.qaUserId == user_id)
+                ))
+                stmt_tot = stmt_tot.where(Evaluation.qaUserId == user_id)
+            elif role == "VERIFIER" and user_id:
+                stmt_rec = stmt_rec.where(DeviationRecord.evaluationId.in_(
+                    select(Evaluation.id).where(Evaluation.verifierUserId == user_id)
+                ))
+                stmt_tot = stmt_tot.where(Evaluation.verifierUserId == user_id)
+
+            records = list(ts.execute(stmt_rec).scalars())
+            total = ts.execute(stmt_tot).scalar_one()
         counts: dict[str, dict[str, Any]] = {}
         for r in records:
             k = r.questionKey
@@ -391,20 +423,29 @@ def verifier_overrides(tenant_id: str, from_: datetime, to: datetime) -> list[di
             for r in ranked
         ]
 
-    return _cached(tenant_id, "verifier_overrides", from_, to, _produce)
+    return _cached(tenant_id, "verifier_overrides", from_, to, _produce, role, user_id)
 
 
-def rejection_reasons(tenant_id: str, from_: datetime, to: datetime) -> list[dict[str, Any]]:
+def rejection_reasons(tenant_id: str, from_: datetime, to: datetime, role: str | None = None, user_id: str | None = None) -> list[dict[str, Any]]:
     def _produce():
+        eval_join = ""
+        params = {"a": from_, "b": to}
+        if role == "QA" and user_id:
+            eval_join = ' JOIN evaluations e ON e.id = a."evaluationId" AND e."qaUserId" = :uid'
+            params["uid"] = user_id
+        elif role == "VERIFIER" and user_id:
+            eval_join = ' JOIN evaluations e ON e.id = a."evaluationId" AND e."verifierUserId" = :uid'
+            params["uid"] = user_id
+
         pool = get_tenant_pool()
         with pool.session(tenant_id) as ts:
             rows = ts.execute(
                 text(
-                    'SELECT metadata FROM audit_logs '
-                    'WHERE action = \'verifier_reject\' '
-                    '  AND "createdAt" >= :a AND "createdAt" <= :b'
+                    f'SELECT a.metadata FROM audit_logs a {eval_join} '
+                    f'WHERE a.action = \'verifier_reject\' '
+                    f'  AND a."createdAt" >= :a AND a."createdAt" <= :b'
                 ),
-                {"a": from_, "b": to},
+                params,
             ).mappings().all()
         counts: dict[str, int] = {}
         for row in rows:
@@ -418,11 +459,20 @@ def rejection_reasons(tenant_id: str, from_: datetime, to: datetime) -> list[dic
             for reason, cnt in ranked
         ]
 
-    return _cached(tenant_id, "rejection_reasons", from_, to, _produce)
+    return _cached(tenant_id, "rejection_reasons", from_, to, _produce, role, user_id)
 
 
-def score_trends(tenant_id: str, from_: datetime, to: datetime) -> dict[str, list[dict[str, Any]]]:
+def score_trends(tenant_id: str, from_: datetime, to: datetime, role: str | None = None, user_id: str | None = None) -> dict[str, list[dict[str, Any]]]:
     def _produce():
+        eval_filter = ""
+        params = {"a": from_, "b": to}
+        if role == "QA" and user_id:
+            eval_filter = ' AND e."qaUserId" = :uid'
+            params["uid"] = user_id
+        elif role == "VERIFIER" and user_id:
+            eval_filter = ' AND e."verifierUserId" = :uid'
+            params["uid"] = user_id
+
         pool = get_tenant_pool()
         with pool.session(tenant_id) as ts:
             by_day = ts.execute(
@@ -435,12 +485,12 @@ def score_trends(tenant_id: str, from_: datetime, to: datetime) -> dict[str, lis
                                     THEN 1 ELSE 0 END) AS pass_count
                     FROM evaluations e
                     WHERE e."workflowState" = 'LOCKED'
-                      AND e."lockedAt" >= :a AND e."lockedAt" <= :b
+                      AND e."lockedAt" >= :a AND e."lockedAt" <= :b{eval_filter}
                     GROUP BY DATE(e."lockedAt")
                     ORDER BY date ASC
                     """
                 ),
-                {"a": from_, "b": to},
+                params,
             ).mappings().all()
             by_channel = ts.execute(
                 text(
@@ -453,12 +503,12 @@ def score_trends(tenant_id: str, from_: datetime, to: datetime) -> dict[str, lis
                     FROM evaluations e
                     JOIN conversations c ON c.id = e."conversationId"
                     WHERE e."workflowState" = 'LOCKED'
-                      AND e."lockedAt" >= :a AND e."lockedAt" <= :b
+                      AND e."lockedAt" >= :a AND e."lockedAt" <= :b{eval_filter}
                     GROUP BY c."channel"
                     ORDER BY count DESC
                     """
                 ),
-                {"a": from_, "b": to},
+                params,
             ).mappings().all()
         return {
             "byDay": [
@@ -481,7 +531,7 @@ def score_trends(tenant_id: str, from_: datetime, to: datetime) -> dict[str, lis
             ],
         }
 
-    return _cached(tenant_id, "score_trends", from_, to, _produce)
+    return _cached(tenant_id, "score_trends", from_, to, _produce, role, user_id)
 
 
 # def ai_usage_trends(
@@ -517,14 +567,23 @@ def score_trends(tenant_id: str, from_: datetime, to: datetime) -> dict[str, lis
 
 
 def qa_reviewer_performance(
-    tenant_id: str, from_: datetime, to: datetime
+    tenant_id: str, from_: datetime, to: datetime, role: str | None = None, user_id: str | None = None
 ) -> list[dict[str, Any]]:
     def _produce():
+        eval_filter = ""
+        params = {"a": from_, "b": to}
+        if role == "QA" and user_id:
+            eval_filter = ' AND e."qaUserId" = :uid'
+            params["uid"] = user_id
+        elif role == "VERIFIER" and user_id:
+            eval_filter = ' AND e."verifierUserId" = :uid'
+            params["uid"] = user_id
+
         pool = get_tenant_pool()
         with pool.session(tenant_id) as ts:
             rows = ts.execute(
                 text(
-                    """
+                    f"""
                     SELECT e."qaUserId",
                            COUNT(*) AS count,
                            AVG(e."qaScore") AS avg_qa,
@@ -532,12 +591,12 @@ def qa_reviewer_performance(
                                AS avg_turn_ms
                     FROM evaluations e
                     WHERE e."qaUserId" IS NOT NULL
-                      AND e."qaCompletedAt" >= :a AND e."qaCompletedAt" <= :b
+                      AND e."qaCompletedAt" >= :a AND e."qaCompletedAt" <= :b{eval_filter}
                     GROUP BY e."qaUserId"
                     ORDER BY count DESC
                     """
                 ),
-                {"a": from_, "b": to},
+                params,
             ).mappings().all()
         return [
             {
@@ -551,26 +610,38 @@ def qa_reviewer_performance(
             for r in rows
         ]
 
-    return _cached(tenant_id, "qa_reviewer_performance", from_, to, _produce)
+    return _cached(tenant_id, "qa_reviewer_performance", from_, to, _produce, role, user_id)
 
 
-def verifier_report(tenant_id: str, from_: datetime, to: datetime) -> list[dict[str, Any]]:
+def verifier_report(tenant_id: str, from_: datetime, to: datetime, role: str | None = None, user_id: str | None = None) -> list[dict[str, Any]]:
     def _produce():
+        eval_filter = ""
+        audit_filter = ""
+        params = {"a": from_, "b": to}
+        if role == "QA" and user_id:
+            eval_filter = ' AND e."qaUserId" = :uid'
+            audit_filter = ' AND "evaluationId" IN (SELECT id FROM evaluations WHERE "qaUserId" = :uid)'
+            params["uid"] = user_id
+        elif role == "VERIFIER" and user_id:
+            eval_filter = ' AND e."verifierUserId" = :uid'
+            audit_filter = ' AND "evaluationId" IN (SELECT id FROM evaluations WHERE "verifierUserId" = :uid)'
+            params["uid"] = user_id
+
         pool = get_tenant_pool()
         with pool.session(tenant_id) as ts:
             verified_rows = ts.execute(
                 text(
-                    """
+                    f"""
                     SELECT e."verifierUserId" AS uid,
                            COUNT(*) AS verified,
                            AVG(e."verifierScore") AS avg_score
                     FROM evaluations e
                     WHERE e."verifierUserId" IS NOT NULL
-                      AND e."verifierCompletedAt" >= :a AND e."verifierCompletedAt" <= :b
+                      AND e."verifierCompletedAt" >= :a AND e."verifierCompletedAt" <= :b{eval_filter}
                     GROUP BY e."verifierUserId"
                     """
                 ),
-                {"a": from_, "b": to},
+                params,
             ).mappings().all()
             # A rejection clears the evaluation's verifierUserId and never sets
             # verifierCompletedAt, so rejected evaluations cannot be attributed
@@ -578,15 +649,15 @@ def verifier_report(tenant_id: str, from_: datetime, to: datetime) -> list[dict[
             # where actorId is the verifier who performed the rejection.
             rejected_rows = ts.execute(
                 text(
-                    """
+                    f"""
                     SELECT "actorId" AS uid, COUNT(*) AS rejected
                     FROM audit_logs
                     WHERE action = 'verifier_reject'
-                      AND "createdAt" >= :a AND "createdAt" <= :b
+                      AND "createdAt" >= :a AND "createdAt" <= :b{audit_filter}
                     GROUP BY "actorId"
                     """
                 ),
-                {"a": from_, "b": to},
+                params,
             ).mappings().all()
 
         verified_map = {r["uid"]: r for r in verified_rows}
@@ -612,34 +683,46 @@ def verifier_report(tenant_id: str, from_: datetime, to: datetime) -> list[dict[
         report.sort(key=lambda r: r["totalVerified"], reverse=True)
         return report
 
-    return _cached(tenant_id, "verifier_report", from_, to, _produce)
+    return _cached(tenant_id, "verifier_report", from_, to, _produce, role, user_id)
 
 
-def conversation_volume(tenant_id: str, from_: datetime, to: datetime) -> list[dict[str, Any]]:
+def conversation_volume(tenant_id: str, from_: datetime, to: datetime, role: str | None = None, user_id: str | None = None) -> list[dict[str, Any]]:
     def _produce():
+        conv_filter = ""
+        eval_filter = ""
+        params = {"a": from_, "b": to}
+        if role == "QA" and user_id:
+            conv_filter = ' AND id IN (SELECT "conversationId" FROM evaluations WHERE "qaUserId" = :uid)'
+            eval_filter = ' AND "qaUserId" = :uid'
+            params["uid"] = user_id
+        elif role == "VERIFIER" and user_id:
+            conv_filter = ' AND id IN (SELECT "conversationId" FROM evaluations WHERE "verifierUserId" = :uid)'
+            eval_filter = ' AND "verifierUserId" = :uid'
+            params["uid"] = user_id
+
         pool = get_tenant_pool()
         with pool.session(tenant_id) as ts:
             conv_rows = ts.execute(
                 text(
-                    """
+                    f"""
                     SELECT DATE(c."receivedAt") AS date, COUNT(*) AS count
                     FROM conversations c
-                    WHERE c."receivedAt" >= :a AND c."receivedAt" <= :b
+                    WHERE c."receivedAt" >= :a AND c."receivedAt" <= :b{conv_filter}
                     GROUP BY DATE(c."receivedAt") ORDER BY date ASC
                     """
                 ),
-                {"a": from_, "b": to},
+                params,
             ).mappings().all()
             eval_rows = ts.execute(
                 text(
-                    """
+                    f"""
                     SELECT DATE(e."createdAt") AS date, COUNT(*) AS count
                     FROM evaluations e
-                    WHERE e."createdAt" >= :a AND e."createdAt" <= :b
+                    WHERE e."createdAt" >= :a AND e."createdAt" <= :b{eval_filter}
                     GROUP BY DATE(e."createdAt") ORDER BY date ASC
                     """
                 ),
-                {"a": from_, "b": to},
+                params,
             ).mappings().all()
         merged: dict[str, dict[str, Any]] = {}
         for r in conv_rows:
@@ -651,16 +734,25 @@ def conversation_volume(tenant_id: str, from_: datetime, to: datetime) -> list[d
             merged[d]["evaluations"] = int(r["count"])
         return sorted(merged.values(), key=lambda x: x["date"])
 
-    return _cached(tenant_id, "conversation_volume", from_, to, _produce)
+    return _cached(tenant_id, "conversation_volume", from_, to, _produce, role, user_id)
 
 
-def sla_report(tenant_id: str, from_: datetime, to: datetime) -> dict[str, Any]:
+def sla_report(tenant_id: str, from_: datetime, to: datetime, role: str | None = None, user_id: str | None = None) -> dict[str, Any]:
     def _produce():
+        eval_filter = ""
+        params = {"a": from_, "b": to}
+        if role == "QA" and user_id:
+            eval_filter = ' AND e."qaUserId" = :uid'
+            params["uid"] = user_id
+        elif role == "VERIFIER" and user_id:
+            eval_filter = ' AND e."verifierUserId" = :uid'
+            params["uid"] = user_id
+
         pool = get_tenant_pool()
         with pool.session(tenant_id) as ts:
             rows = ts.execute(
                 text(
-                    """
+                    f"""
                     SELECT DATE(e."lockedAt") AS date,
                            AVG(EXTRACT(EPOCH FROM (e."lockedAt" - c."receivedAt")) / 3600)
                                AS avg_h,
@@ -672,11 +764,11 @@ def sla_report(tenant_id: str, from_: datetime, to: datetime) -> dict[str, Any]:
                     FROM evaluations e
                     JOIN conversations c ON c.id = e."conversationId"
                     WHERE e."workflowState" = 'LOCKED'
-                      AND e."lockedAt" >= :a AND e."lockedAt" <= :b
+                      AND e."lockedAt" >= :a AND e."lockedAt" <= :b{eval_filter}
                     GROUP BY DATE(e."lockedAt") ORDER BY date ASC
                     """
                 ),
-                {"a": from_, "b": to},
+                params,
             ).mappings().all()
         total_count = sum(int(r["count"]) for r in rows if r["avg_h"] is not None)
         overall_avg = (
@@ -702,16 +794,25 @@ def sla_report(tenant_id: str, from_: datetime, to: datetime) -> dict[str, Any]:
             ],
         }
 
-    return _cached(tenant_id, "sla_report", from_, to, _produce)
+    return _cached(tenant_id, "sla_report", from_, to, _produce, role, user_id)
 
 
-def form_score_distribution(tenant_id: str, from_: datetime, to: datetime) -> list[dict[str, Any]]:
+def form_score_distribution(tenant_id: str, from_: datetime, to: datetime, role: str | None = None, user_id: str | None = None) -> list[dict[str, Any]]:
     def _produce():
+        eval_filter = ""
+        params = {"a": from_, "b": to}
+        if role == "QA" and user_id:
+            eval_filter = ' AND e."qaUserId" = :uid'
+            params["uid"] = user_id
+        elif role == "VERIFIER" and user_id:
+            eval_filter = ' AND e."verifierUserId" = :uid'
+            params["uid"] = user_id
+
         pool = get_tenant_pool()
         with pool.session(tenant_id) as ts:
             rows = ts.execute(
                 text(
-                    """
+                    f"""
                     SELECT fd."formKey", fd."name" AS form_name,
                            FLOOR(e."finalScore" / 10) * 10 AS bucket,
                            COUNT(*) AS count
@@ -719,12 +820,12 @@ def form_score_distribution(tenant_id: str, from_: datetime, to: datetime) -> li
                     JOIN form_definitions fd ON fd.id = e."formDefinitionId"
                     WHERE e."workflowState" = 'LOCKED'
                       AND e."finalScore" IS NOT NULL
-                      AND e."lockedAt" >= :a AND e."lockedAt" <= :b
+                      AND e."lockedAt" >= :a AND e."lockedAt" <= :b{eval_filter}
                     GROUP BY fd."formKey", fd."name", bucket
                     ORDER BY fd."formKey", bucket ASC
                     """
                 ),
-                {"a": from_, "b": to},
+                params,
             ).mappings().all()
         by_form: dict[str, dict[str, Any]] = {}
         for r in rows:
@@ -746,4 +847,4 @@ def form_score_distribution(tenant_id: str, from_: datetime, to: datetime) -> li
             )
         return list(by_form.values())
 
-    return _cached(tenant_id, "form_score_distribution", from_, to, _produce)
+    return _cached(tenant_id, "form_score_distribution", from_, to, _produce, role, user_id)

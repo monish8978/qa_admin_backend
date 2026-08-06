@@ -354,11 +354,31 @@ def _queue_listing(
         elif role == "VERIFIER" and user_id:
             q = q.where(or_(Evaluation.verifierUserId == user_id, Evaluation.verifierUserId.is_(None)))
 
+        matching_user_ids = []
+        if search and search.strip():
+            from ..db import SessionLocal
+            from ..models.master import User
+            with SessionLocal() as master_session:
+                users = master_session.execute(
+                    select(User.id, User.name, User.tenantId).where(
+                        (User.tenantId == tenant_id)
+                        & (User.name.ilike(f"%{search.strip()}%"))
+                    )
+                ).all()
+                matching_user_ids = [u.id for u in users]
+
         if department_id:
             q = q.where(Evaluation.departmentId == department_id)
         if search and search.strip():
+            conditions = [_conversation_search_clause(search)]
+            if matching_user_ids:
+                if queue_type == "QA_QUEUE":
+                    conditions.append(Evaluation.qaUserId.in_(matching_user_ids))
+                elif queue_type in ("VERIFIER_QUEUE", "AUDIT_QUEUE", "ESCALATION_QUEUE"):
+                    conditions.append(Evaluation.qaUserId.in_(matching_user_ids))
+                    conditions.append(Evaluation.verifierUserId.in_(matching_user_ids))
             q = q.join(Conversation, Evaluation.conversationId == Conversation.id).where(
-                _conversation_search_clause(search)
+                or_(*conditions)
             )
         total = ts.execute(select(func.count()).select_from(q.subquery())).scalar_one()
         order_col = getattr(Evaluation, order_field)
@@ -512,10 +532,31 @@ def _direct_queue_listing(
             q = q.join(Evaluation, WorkflowQueue.evaluationId == Evaluation.id).where(Evaluation.verifierUserId == user_id)
             joined_evaluation = True
 
+        matching_user_ids = []
+        if search and search.strip():
+            from ..db import SessionLocal
+            from ..models.master import User
+            with SessionLocal() as master_session:
+                users = master_session.execute(
+                    select(User.id).where(
+                        (User.tenantId == tenant_id)
+                        & (User.name.ilike(f"%{search.strip()}%"))
+                    )
+                ).scalars().all()
+                matching_user_ids = list(users)
+
         if search and search.strip():
             if not joined_evaluation:
                 q = q.join(Evaluation, WorkflowQueue.evaluationId == Evaluation.id)
-            q = q.join(Conversation, Evaluation.conversationId == Conversation.id).where(_conversation_search_clause(search))
+            
+            conditions = [_conversation_search_clause(search)]
+            if matching_user_ids:
+                conditions.append(Evaluation.qaUserId.in_(matching_user_ids))
+                conditions.append(Evaluation.verifierUserId.in_(matching_user_ids))
+                
+            q = q.join(Conversation, Evaluation.conversationId == Conversation.id).where(
+                or_(*conditions)
+            )
 
         total = ts.execute(select(func.count()).select_from(q.subquery())).scalar_one()
         rows = list(
@@ -550,6 +591,8 @@ def _direct_queue_listing(
                     "escalationReason": ev.escalationReason,
                     "formDefinitionId": ev.formDefinitionId,
                     "formVersion": ev.formVersion,
+                    "qaUserId": ev.qaUserId,
+                    "verifierUserId": ev.verifierUserId,
                     "conversation": _conversation_dict(conv),
                 }
             items.append({**_queue_dict(queue), "evaluation": evaluation_dict})
@@ -1402,7 +1445,7 @@ def verifier_modify(
 
         conv = ts.get(Conversation, ev.conversationId)
         if conv:
-            conv.status = "COMPLETED"
+            conv.status = "AUDIT" if should_create_audit else "COMPLETED"
 
         _add_audit(
             ts,
@@ -1909,6 +1952,13 @@ def resolve_audit_case(
             actor_role=actor_role,
             metadata={"note": note, "status": status},
         )
+        
+        ev = ts.get(Evaluation, ac.evaluationId)
+        if ev:
+            conv = ts.get(Conversation, ev.conversationId)
+            if conv:
+                conv.status = "COMPLETED"
+
         ts.commit()
         return {"id": audit_case_id, "status": status, "resolvedAt": now.isoformat()}
 

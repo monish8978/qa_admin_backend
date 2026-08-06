@@ -206,7 +206,7 @@ class AuthService:
 
         otp = str(random.randint(100000, 999999))
         mfa_token = random_token_hex(32)
-        redis.set(f"mfa_session:{mfa_token}", json.dumps({"userId": user.id, "otp": otp}), ex=300)
+        redis.set(f"mfa_session:{mfa_token}", json.dumps({"userId": user.id, "otp": otp, "confirmLogout": dto.confirmLogout}), ex=300)
         log.info("OTP generated for user %s: %s", user.email, otp)
 
         try:
@@ -264,10 +264,25 @@ class AuthService:
         if user.tenant.status in ("SUSPENDED", "CANCELLED"):
             raise forbidden("ACCOUNT_SUSPENDED", "Tenant account is suspended")
 
-        return self._complete_login(user)
+        confirm_logout = session_data.get("confirmLogout", False)
+        return self._complete_login(user, confirm_logout=confirm_logout)
 
-    def _complete_login(self, user: User) -> dict:
+    def _complete_login(self, user: User, confirm_logout: bool = False) -> dict:
         now = datetime.now(tz=timezone.utc)
+
+        if confirm_logout:
+            from sqlalchemy import update
+            self.db.execute(
+                update(RefreshToken)
+                .where(
+                    RefreshToken.userId == user.id,
+                    RefreshToken.revokedAt.is_(None)
+                )
+                .values(revokedAt=now)
+            )
+            self.db.commit()
+            log.info("Revoked previous active refresh tokens for user=%s", user.email)
+
         prev_login = user.lastLoginAt
         if prev_login is not None and prev_login.tzinfo is None:
             prev_login = prev_login.replace(tzinfo=timezone.utc)
